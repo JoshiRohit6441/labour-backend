@@ -1,0 +1,442 @@
+generator client {
+  provider = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+enum UserRole {
+  ADMIN
+  STAFF
+  CONTRACTOR
+  USER
+  GUEST
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING_VERIFICATION
+}
+
+enum JobType {
+  IMMEDIATE
+  SCHEDULED
+  BIDDING
+}
+
+enum JobStatus {
+  PENDING
+  QUOTED
+  ACCEPTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  DISPUTED
+}
+
+enum PaymentStatus {
+  PENDING
+  PARTIAL
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  EXPIRED
+}
+
+enum NotificationType {
+  JOB_REQUEST
+  QUOTE_RECEIVED
+  JOB_ACCEPTED
+  JOB_STARTED
+  JOB_COMPLETED
+  PAYMENT_RECEIVED
+  LOCATION_UPDATE
+  SYSTEM_ALERT
+}
+
+// User Management
+model User {
+  id                String      @id @default(cuid())
+  email             String?     @unique
+  phone             String      @unique
+  password          String?
+  firstName         String
+  lastName          String
+  role              UserRole    @default(USER)
+  status            UserStatus  @default(PENDING_VERIFICATION)
+  profileImage      String?
+  dateOfBirth       DateTime?
+  address           String?
+  city              String?
+  state             String?
+  pincode           String?
+  latitude          Float?
+  longitude         Float?
+  isVerified        Boolean     @default(false)
+  isGuest           Boolean     @default(false)
+  lastLoginAt       DateTime?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  contractorProfile Contractor?
+  jobsAsUser        Job[]       @relation("JobUser")
+  reviewsGiven      Review[]    @relation("ReviewGiver")
+  reviewsReceived   Review[]    @relation("ReviewReceiver")
+  notifications     Notification[]
+  payments          Payment[]
+  documents         Document[]
+  locationUpdates   LocationUpdate[]
+  chatMessages      ChatMessage[]
+  chatRooms         ChatRoom[]  @relation("ChatRoomUser")
+
+  @@map("users")
+}
+
+// Contractor Profile
+model Contractor {
+  id                String      @id @default(cuid())
+  userId            String      @unique
+  businessName      String
+  businessType      String
+  gstNumber         String?
+  panNumber         String?
+  businessAddress   String
+  businessCity      String
+  businessState     String
+  businessPincode   String
+  businessLatitude  Float?
+  businessLongitude Float?
+  coverageRadius    Float       @default(20.0)
+  isActive          Boolean     @default(true)
+  rating            Float       @default(0.0)
+  totalJobs         Int         @default(0)
+  completedJobs     Int         @default(0)
+  bankAccountNumber String?
+  bankIfscCode      String?
+  bankAccountName   String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workers           Worker[]
+  rateCards         RateCard[]
+  jobs              Job[]       @relation("JobContractor")
+  reviews           Review[]    @relation("ContractorReview")
+  quotes            Quote[]
+
+  @@map("contractors")
+}
+
+// Worker Management
+model Worker {
+  id                String      @id @default(cuid())
+  contractorId      String
+  firstName         String
+  lastName          String
+  phone             String
+  email             String?
+  profileImage      String?
+  skills            String[]    
+  experience        Int?        
+  hourlyRate        Float?
+  dailyRate         Float?
+  isActive          Boolean     @default(true)
+  isVerified        Boolean     @default(false)
+  rating            Float       @default(0.0)
+  totalJobs         Int         @default(0)
+  completedJobs     Int         @default(0)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  contractor        Contractor  @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+  availability      Availability[]
+  jobAssignments    JobAssignment[]
+  documents         Document[]
+  reviews           Review[]    @relation("WorkerReview")
+
+  @@map("workers")
+}
+
+// Rate Cards
+model RateCard {
+  id                String      @id @default(cuid())
+  contractorId      String
+  skill             String
+  minHours          Int         @default(1)
+  hourlyRate        Float
+  dailyRate         Float?
+  travelCharges     Float       @default(0.0)
+  extraCharges      Float       @default(0.0)
+  isActive          Boolean     @default(true)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  contractor        Contractor  @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+
+  @@map("rate_cards")
+}
+
+// Availability Management
+model Availability {
+  id                String      @id @default(cuid())
+  workerId          String
+  date              DateTime    @db.Date
+  timeSlot          String?     
+  isAvailable       Boolean     @default(true)
+  notes             String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  worker            Worker      @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@unique([workerId, date, timeSlot])
+  @@map("availability")
+}
+
+// Job Management
+model Job {
+  id                String      @id @default(cuid())
+  userId            String
+  contractorId      String?
+  title             String
+  description       String
+  jobType           JobType
+  status            JobStatus   @default(PENDING)
+  address           String
+  city              String
+  state             String
+  pincode           String
+  latitude          Float
+  longitude         Float
+  scheduledDate     DateTime?
+  scheduledTime     String?
+  estimatedDuration Int?        
+  numberOfWorkers   Int         @default(1)
+  requiredSkills    String[]
+  images            String[]    
+  budget            Float?
+  acceptedQuote     Float?
+  advancePaid       Float       @default(0.0)
+  totalPaid         Float       @default(0.0)
+  isLocationTracking Boolean    @default(false)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  user              User        @relation("JobUser", fields: [userId], references: [id])
+  contractor        Contractor? @relation("JobContractor", fields: [contractorId], references: [id])
+  quotes            Quote[]
+  assignments       JobAssignment[]
+  reviews           Review[]    @relation("JobReview")
+  payments          Payment[]
+  locationUpdates   LocationUpdate[]
+  chatRoom          ChatRoom?
+
+  @@map("jobs")
+}
+
+// Quote Management
+model Quote {
+  id                String      @id @default(cuid())
+  jobId             String
+  contractorId      String
+  amount            Float
+  estimatedArrival  String?     
+  notes             String?
+  isAccepted        Boolean     @default(false)
+  expiresAt         DateTime?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  job               Job         @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  contractor        Contractor  @relation(fields: [contractorId], references: [id])
+
+  @@map("quotes")
+}
+
+// Job Assignment
+model JobAssignment {
+  id                String      @id @default(cuid())
+  jobId             String
+  workerId          String
+  assignedAt        DateTime    @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+  status            String      @default("assigned") 
+
+  // Relations
+  job               Job         @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  worker            Worker      @relation(fields: [workerId], references: [id])
+
+  @@unique([jobId, workerId])
+  @@map("job_assignments")
+}
+
+// Review System
+model Review {
+  id                String      @id @default(cuid())
+  jobId             String
+  giverId           String      
+  receiverId        String      
+  receiverType      String      
+  rating            Int         
+  comment           String?
+  createdAt         DateTime    @default(now())
+
+  // Relations
+  job               Job         @relation("JobReview", fields: [jobId], references: [id])
+  giver             User        @relation("ReviewGiver", fields: [giverId], references: [id])
+  receiver          User        @relation("ReviewReceiver", fields: [receiverId], references: [id], map: "review_receiver_user_fkey")
+  contractor        Contractor? @relation("ContractorReview", fields: [receiverId], references: [id], map: "review_receiver_contractor_fkey")
+  worker            Worker?     @relation("WorkerReview", fields: [receiverId], references: [id], map: "review_receiver_worker_fkey")
+
+  @@unique([jobId, giverId, receiverId])
+  @@map("reviews")
+}
+
+// Payment Management
+model Payment {
+  id                String      @id @default(cuid())
+  jobId             String
+  userId            String
+  amount            Float
+  paymentType       String      
+  status            PaymentStatus @default(PENDING)
+  gateway           String?     
+  gatewayId         String?     
+  gatewayResponse   Json?       
+  refundAmount      Float?      @default(0.0)
+  refundReason      String?
+  processedAt       DateTime?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  job               Job         @relation(fields: [jobId], references: [id])
+  user              User        @relation(fields: [userId], references: [id])
+
+  @@map("payments")
+}
+
+// Document Management
+model Document {
+  id                String      @id @default(cuid())
+  userId            String?
+  workerId          String?
+  documentType      String      
+  documentNumber    String?     
+  documentUrl       String      
+  verificationStatus VerificationStatus @default(PENDING)
+  verifiedAt        DateTime?
+  verifiedBy        String?     
+  rejectionReason   String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  user              User?       @relation(fields: [userId], references: [id])
+  worker            Worker?     @relation(fields: [workerId], references: [id])
+
+  @@map("documents")
+}
+
+// Notification System
+model Notification {
+  id                String      @id @default(cuid())
+  userId            String
+  type              NotificationType
+  title             String
+  message           String
+  data              Json?       
+  isRead            Boolean     @default(false)
+  sentAt            DateTime    @default(now())
+  readAt            DateTime?
+
+  // Relations
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+}
+
+// Location Tracking
+model LocationUpdate {
+  id                String      @id @default(cuid())
+  userId            String
+  jobId             String
+  latitude          Float
+  longitude         Float
+  accuracy          Float?
+  timestamp         DateTime    @default(now())
+
+  // Relations
+  user              User        @relation(fields: [userId], references: [id])
+  job               Job         @relation(fields: [jobId], references: [id])
+
+  @@map("location_updates")
+}
+
+// Chat System
+model ChatRoom {
+  id                String      @id @default(cuid())
+  jobId             String      @unique
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  // Relations
+  job               Job         @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  messages          ChatMessage[]
+  participants      User[]      @relation("ChatRoomUser")
+
+  @@map("chat_rooms")
+}
+
+model ChatMessage {
+  id                String      @id @default(cuid())
+  chatRoomId        String
+  senderId          String
+  message           String
+  messageType       String      @default("text") 
+  fileUrl           String?
+  isRead            Boolean     @default(false)
+  createdAt         DateTime    @default(now())
+
+  // Relations
+  chatRoom          ChatRoom    @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+  sender            User        @relation(fields: [senderId], references: [id])
+
+  @@map("chat_messages")
+}
+
+// Audit Logs
+model AuditLog {
+  id                String      @id @default(cuid())
+  userId            String?
+  action            String
+  entityType        String
+  entityId          String?
+  oldValues         Json?
+  newValues         Json?
+  ipAddress         String?
+  userAgent         String?
+  createdAt         DateTime    @default(now())
+
+  @@map("audit_logs")
+}
