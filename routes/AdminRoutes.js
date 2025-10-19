@@ -8,9 +8,17 @@ import { validatePagination } from '../middleware/validation.js';
 
 const router = express.Router();
 
+// Auth routes
+router.post('/register', AdminController.register);
+router.post('/login', AdminController.login);
+
 // All routes require admin authentication
-router.use(authenticateToken);
 router.use(requireRole(['ADMIN', 'STAFF']));
+
+router.use(authenticateToken);
+
+
+
 
 // Dashboard routes
 router.get('/dashboard', AdminController.getDashboardStats);
