@@ -1,8 +1,8 @@
 import prisma from '../../config/database.js';
-import { 
-  generateToken, 
-  generateRefreshToken, 
-  hashPassword, 
+import {
+  generateToken,
+  generateRefreshToken,
+  hashPassword,
   comparePassword,
   storeRefreshToken,
   deleteRefreshToken,
@@ -13,7 +13,6 @@ import {
 } from '../../utils/auth.js';
 import { formatPhoneNumber, maskSensitiveData, generatePaginationMeta } from '../../utils/helpers.js';
 import twilioClient from '../../config/twilioConfig.js';
-import transporter from '../../config/nodemailerConfig.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 
 class UserController {
@@ -265,7 +264,7 @@ class UserController {
     try {
       // Verify refresh token
       const decoded = jwt.verify(refreshToken, JWT_SECRET);
-      
+
       // Check if refresh token exists in Redis
       const storedToken = await getRefreshToken(decoded.userId);
       if (storedToken !== refreshToken) {

@@ -1,8 +1,142 @@
 import prisma from '../../config/database.js';
-import { generatePaginationMeta } from '../../utils/helpers.js';
+import { formatPhoneNumber, generatePaginationMeta, maskSensitiveData } from '../../utils/helpers.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
+import { comparePassword, generateRefreshToken, generateToken, hashPassword, storeRefreshToken } from '../../utils/auth.js';
 
 class AdminController {
+  // Register Admin
+  static register = asyncHandler(async (req, res) => {
+    const { firstName, lastName, email, phone, password, role = 'ADMIN' } = req.body;
+
+    // Check if user already exists
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { email: email },
+          { phone: formatPhoneNumber(phone) }
+        ]
+      }
+    });
+
+    if (existingUser) {
+      return res.status(409).json({
+        error: 'User already exists',
+        message: 'A user with this email or phone number already exists'
+      });
+    }
+
+    // Hash password if provided
+    const hashedPassword = password ? await hashPassword(password) : null;
+
+    // Create user
+    const user = await prisma.user.create({
+      data: {
+        firstName,
+        lastName,
+        email,
+        phone: formatPhoneNumber(phone),
+        password: hashedPassword,
+        role,
+        status: 'ACTIVE',
+        isVerified: true
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        role: true,
+        status: true,
+        isVerified: true,
+        createdAt: true
+      }
+    });
+
+    res.status(201).json({
+      message: 'Admin registered successfully. ',
+      user: {
+        ...user,
+        phone: maskSensitiveData(user.phone, 'phone'),
+        email: user.email ? maskSensitiveData(user.email, 'email') : null
+      }
+    });
+  });
+
+  // Login Admin
+  static login = asyncHandler(async (req, res) => {
+    const { phone, password } = req.body;
+
+    // Find user
+    const user = await prisma.user.findUnique({
+      where: { phone: formatPhoneNumber(phone) },
+      include: {
+        contractorProfile: true
+      }
+    });
+
+    if (!user) {
+      return res.status(401).json({
+        error: 'Invalid credentials',
+        message: 'Phone number or password is incorrect'
+      });
+    }
+
+    // Check password if user has one
+    if (user.password && !(await comparePassword(password, user.password))) {
+      return res.status(401).json({
+        error: 'Invalid credentials',
+        message: 'Phone number or password is incorrect'
+      });
+    }
+
+    // Check user status
+    if (user.status === 'SUSPENDED') {
+      return res.status(403).json({
+        error: 'Account suspended',
+        message: 'Your account has been suspended. Please contact support.'
+      });
+    }
+
+    // Update last login
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date() }
+    });
+
+    // Generate tokens
+    const tokenPayload = {
+      userId: user.id,
+      role: user.role,
+      isVerified: user.isVerified
+    };
+
+    const accessToken = generateToken(tokenPayload);
+    const refreshToken = generateRefreshToken(tokenPayload);
+
+    // Store refresh token
+    await storeRefreshToken(user.id, refreshToken);
+
+    res.json({
+      message: 'Login successful',
+      user: {
+        id: user.id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: maskSensitiveData(user.phone, 'phone'),
+        role: user.role,
+        status: user.status,
+        isVerified: user.isVerified,
+        contractorProfile: user.contractorProfile
+      },
+      tokens: {
+        accessToken,
+        refreshToken
+      }
+    });
+  });
+
   // Get dashboard stats
   static getDashboardStats = asyncHandler(async (req, res) => {
     const [
