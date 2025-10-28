@@ -1,5 +1,5 @@
 import prisma from '../../config/database.js';
-import { calculateDistance, generatePaginationMeta } from '../../utils/helpers.js';
+import { calculateDistance, generatePaginationMeta, isValidPAN, maskSensitiveData } from '../../utils/helpers.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 
 class ContractorController {
@@ -35,6 +35,17 @@ class ContractorController {
       });
     }
 
+    // Validate and mask sensitive data
+    if (panNumber && !isValidPAN(panNumber)) {
+      return res.status(400).json({
+        error: 'Invalid PAN',
+        message: 'Please provide a valid PAN number'
+      });
+    }
+
+    const maskedPanNumber = panNumber ? maskSensitiveData(panNumber, 'pan') : null;
+    const maskedBankAccountNumber = bankAccountNumber ? maskSensitiveData(bankAccountNumber, 'bank') : null;
+
     // Create contractor profile
     const contractor = await prisma.contractor.create({
       data: {
@@ -42,7 +53,7 @@ class ContractorController {
         businessName,
         businessType,
         gstNumber,
-        panNumber,
+        panNumber: maskedPanNumber,
         businessAddress,
         businessCity,
         businessState,
@@ -50,7 +61,7 @@ class ContractorController {
         businessLatitude,
         businessLongitude,
         coverageRadius,
-        bankAccountNumber,
+        bankAccountNumber: maskedBankAccountNumber,
         bankIfscCode,
         bankAccountName
       },
@@ -137,6 +148,21 @@ class ContractorController {
   static updateProfile = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const updateData = req.body;
+
+    // Validate and mask sensitive data if present in the update
+    if (updateData.panNumber) {
+      if (!isValidPAN(updateData.panNumber)) {
+        return res.status(400).json({
+          error: 'Invalid PAN',
+          message: 'Please provide a valid PAN number'
+        });
+      }
+      updateData.panNumber = maskSensitiveData(updateData.panNumber, 'pan');
+    }
+
+    if (updateData.bankAccountNumber) {
+      updateData.bankAccountNumber = maskSensitiveData(updateData.bankAccountNumber, 'bank');
+    }
 
     const contractor = await prisma.contractor.update({
       where: { userId },

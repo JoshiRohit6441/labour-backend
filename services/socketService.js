@@ -91,13 +91,27 @@ class SocketService {
             return;
           }
 
+          // Enforce tracking rules: only for IMMEDIATE jobs, while tracking is enabled and job is in progress
+          if (job.jobType !== 'IMMEDIATE') {
+            socket.emit('error', { message: 'Location tracking allowed only for IMMEDIATE jobs' });
+            return;
+          }
+          if (!job.isLocationTracking) {
+            socket.emit('error', { message: 'Location tracking is disabled for this job' });
+            return;
+          }
+          if (job.status !== 'IN_PROGRESS') {
+            socket.emit('error', { message: 'Location updates allowed only when job is IN_PROGRESS' });
+            return;
+          }
+
           // Save location update
           await prisma.locationUpdate.create({
             data: {
               userId: socket.userId,
               jobId,
-              latitude,
-              longitude,
+              latitude: parseFloat(latitude),
+              longitude: parseFloat(longitude),
               accuracy
             }
           });

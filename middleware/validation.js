@@ -124,3 +124,37 @@ export const validatePagination = [
   query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit must be 1-100'),
   handleValidationErrors
 ];
+
+// Validation rules for updates (making fields optional)
+export const validateContractorProfileUpdate = [
+  body('businessName').optional().trim().isLength({ min: 2, max: 100 }).withMessage('Business name must be 2-100 characters'),
+  body('businessType').optional().trim().isLength({ min: 2, max: 50 }).withMessage('Business type must be 2-50 characters'),
+  body('businessAddress').optional().trim().isLength({ min: 10, max: 200 }).withMessage('Business address must be 10-200 characters'),
+  body('businessCity').optional().trim().isLength({ min: 2, max: 50 }).withMessage('City must be 2-50 characters'),
+  body('businessState').optional().trim().isLength({ min: 2, max: 50 }).withMessage('State must be 2-50 characters'),
+  body('businessPincode').optional().isPostalCode('IN').withMessage('Valid Indian pincode required'),
+  body('coverageRadius').optional().isFloat({ min: 1, max: 100 }).withMessage('Coverage radius must be 1-100 km'),
+  handleValidationErrors
+];
+
+export const validateWorkerUpdate = [
+  body('firstName').optional().trim().isLength({ min: 2, max: 50 }).withMessage('First name must be 2-50 characters'),
+  body('lastName').optional().trim().isLength({ min: 2, max: 50 }).withMessage('Last name must be 2-50 characters'),
+  body('phone').optional().isMobilePhone('en-IN').withMessage('Valid Indian phone number required'),
+  body('email').optional().isEmail().withMessage('Valid email required'),
+  body('skills').optional().isArray({ min: 1 }).withMessage('At least one skill is required'),
+  body('experience').optional().isInt({ min: 0, max: 50 }).withMessage('Experience must be 0-50 years'),
+  body('hourlyRate').optional().isFloat({ min: 0 }).withMessage('Hourly rate must be positive'),
+  body('dailyRate').optional().isFloat({ min: 0 }).withMessage('Daily rate must be positive'),
+  handleValidationErrors
+];
+
+export const validateRateCardUpdate = [
+  body('skill').optional().trim().isLength({ min: 2, max: 50 }).withMessage('Skill must be 2-50 characters'),
+  body('minHours').optional().isInt({ min: 1, max: 24 }).withMessage('Min hours must be 1-24'),
+  body('hourlyRate').optional().isFloat({ min: 0 }).withMessage('Hourly rate must be positive'),
+  body('dailyRate').optional().isFloat({ min: 0 }).withMessage('Daily rate must be positive'),
+  body('travelCharges').optional().isFloat({ min: 0 }).withMessage('Travel charges must be positive'),
+  body('extraCharges').optional().isFloat({ min: 0 }).withMessage('Extra charges must be positive'),
+  handleValidationErrors
+];

@@ -46,6 +46,10 @@ router.post('/jobs/:jobId/quotes/:quoteId/accept', UserJobController.acceptQuote
 router.post('/jobs/:jobId/reviews', UserJobController.submitReview);
 router.get('/jobs/analytics', UserJobController.getJobAnalytics);
 
+// Location tracking routes
+router.get('/jobs/:jobId/locations/latest', UserJobController.getLatestLocation);
+router.put('/jobs/:jobId/tracking', UserJobController.setTracking);
+
 // Payment routes
 router.post('/payments/create-order', validatePayment, UserPaymentController.createOrder);
 router.post('/payments/verify', UserPaymentController.verifyPayment);

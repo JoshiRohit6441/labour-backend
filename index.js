@@ -27,8 +27,9 @@ const socketService = new SocketService(server);
 // Security middleware
 app.use(helmet());
 app.use(cors({
-  origin: process.env.CLIENT_URL || "http://localhost:3000",
-  credentials: true
+  origin: "*",
+  // origin: process.env.CLIENT_URL || "http://localhost:3000",
+  // credentials: true
 }));
 
 // Rate limiting

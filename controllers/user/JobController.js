@@ -43,7 +43,7 @@ class JobController {
         numberOfWorkers,
         requiredSkills,
         budget,
-        isLocationTracking
+        isLocationTracking: jobType === 'IMMEDIATE' ? true : isLocationTracking
       },
       include: {
         user: {
@@ -152,6 +152,72 @@ class JobController {
     res.json({
       jobs,
       pagination: paginationMeta
+    });
+  });
+
+  // Get latest location updates for a job
+  static getLatestLocation = asyncHandler(async (req, res) => {
+    const { jobId } = req.params;
+    const { limit = 5 } = req.query;
+    const userId = req.user.id;
+
+    const job = await prisma.job.findFirst({
+      where: {
+        id: jobId,
+        OR: [
+          { userId },
+          { contractor: { userId } }
+        ]
+      }
+    });
+
+    if (!job) {
+      return res.status(404).json({
+        error: 'Job not found',
+        message: 'Job not found or you do not have permission to view it'
+      });
+    }
+
+    const updates = await prisma.locationUpdate.findMany({
+      where: { jobId },
+      orderBy: { timestamp: 'desc' },
+      take: Math.min(parseInt(limit), 50)
+    });
+
+    res.json({
+      jobId,
+      isLocationTracking: job.isLocationTracking,
+      jobType: job.jobType,
+      status: job.status,
+      updates
+    });
+  });
+
+  // Enable/Disable location tracking on a job (user-owned)
+  static setTracking = asyncHandler(async (req, res) => {
+    const { jobId } = req.params;
+    const { enabled } = req.body;
+    const userId = req.user.id;
+
+    const job = await prisma.job.findFirst({
+      where: { id: jobId, userId }
+    });
+
+    if (!job) {
+      return res.status(404).json({
+        error: 'Job not found',
+        message: 'Job not found or you do not have permission to update it'
+      });
+    }
+
+    const updated = await prisma.job.update({
+      where: { id: jobId },
+      data: { isLocationTracking: Boolean(enabled) }
+    });
+
+    res.json({
+      message: 'Tracking setting updated',
+      job: { id: updated.id, isLocationTracking: updated.isLocationTracking }
     });
   });
 

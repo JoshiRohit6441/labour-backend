@@ -8,7 +8,10 @@ import {
   validateContractorProfile, 
   validateWorker, 
   validateRateCard,
-  validatePagination 
+  validatePagination,
+  validateContractorProfileUpdate,
+  validateWorkerUpdate,
+  validateRateCardUpdate
 } from '../middleware/validation.js';
 
 const router = express.Router();
@@ -20,12 +23,12 @@ router.use(requireRole(['CONTRACTOR']));
 // Profile routes
 router.post('/profile', validateContractorProfile, ContractorController.createProfile);
 router.get('/profile', ContractorController.getProfile);
-router.put('/profile', ContractorController.updateProfile);
+router.put('/profile', validateContractorProfileUpdate, ContractorController.updateProfile);
 
 // Worker routes
 router.post('/workers', validateWorker, ContractorController.addWorker);
 router.get('/workers', validatePagination, ContractorController.getWorkers);
-router.put('/workers/:workerId', ContractorController.updateWorker);
+router.put('/workers/:workerId', validateWorkerUpdate, ContractorController.updateWorker);
 router.delete('/workers/:workerId', ContractorController.deleteWorker);
 
 // Availability routes
@@ -35,7 +38,7 @@ router.get('/workers/:workerId/availability', ContractorController.getWorkerAvai
 // Rate card routes
 router.post('/rate-cards', validateRateCard, ContractorController.createRateCard);
 router.get('/rate-cards', ContractorController.getRateCards);
-router.put('/rate-cards/:rateCardId', ContractorController.updateRateCard);
+router.put('/rate-cards/:rateCardId', validateRateCardUpdate, ContractorController.updateRateCard);
 router.delete('/rate-cards/:rateCardId', ContractorController.deleteRateCard);
 
 // Job routes
@@ -69,5 +72,3 @@ router.put('/notifications/preferences', ContractorNotificationController.update
 router.get('/notifications/analytics', ContractorNotificationController.getNotificationAnalytics);
 
 export default router;
-
-
