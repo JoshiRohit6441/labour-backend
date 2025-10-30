@@ -52,7 +52,7 @@ class JobController {
             firstName: true,
             lastName: true,
             phone: true,
-            rating: true
+            // rating: true
           }
         }
       }

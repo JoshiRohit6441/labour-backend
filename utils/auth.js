@@ -55,7 +55,7 @@ export const generateOTP = () => {
 // Store OTP in Redis
 export const storeOTP = async (phone, otp) => {
   const key = `otp:${phone}`;
-  await redisClient.setEx(key, 300, otp); // 5 minutes
+  await redisClient.setEx(key, 300, otp);
 };
 
 // Verify OTP

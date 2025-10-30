@@ -66,7 +66,10 @@ class UserController {
 
     // Generate OTP for phone verification
     const otp = generateOTP();
-    await storeOTP(formatPhoneNumber(phone), otp);
+    console.log("otp : ", otp)
+    const formatedPhoneNumber = formatPhoneNumber(phone)
+    const one = await storeOTP(formatedPhoneNumber, otp);
+    console.log("one : ", one)
 
     // Send OTP via SMS
     try {
@@ -228,8 +231,14 @@ class UserController {
 
     // Generate new OTP
     const otp = generateOTP();
-    await storeOTP(formatPhoneNumber(phone), otp);
 
+    console.log("otp : ", otp)
+    try {
+      const formattedPhone = formatPhoneNumber(phone);
+      const info = await storeOTP(formattedPhone, otp);
+    } catch (err) {
+      console.log("otp store error : ", err)
+    }
     // Send OTP via SMS
     try {
       await twilioClient.messages.create({
