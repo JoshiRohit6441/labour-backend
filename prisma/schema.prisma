@@ -225,6 +225,15 @@ model Job {
   pincode           String
   latitude          Float
   longitude         Float
+  // New fields for v2.2
+  workersNeeded     Int?
+  scheduledStartDate DateTime?
+  detailedDescription String?
+  expectedDays      Int?
+  startDate         DateTime?
+  materialsProvidedBy String?
+  siteVisitDeadline DateTime?
+  quoteSubmissionDeadline DateTime?
   scheduledDate     DateTime?
   scheduledTime     String?
   estimatedDuration Int?        
@@ -233,9 +242,11 @@ model Job {
   images            String[]    
   budget            Float?
   acceptedQuote     Float?
+  acceptedQuoteId   String?     @unique
   advancePaid       Float       @default(0.0)
   totalPaid         Float       @default(0.0)
   isLocationTracking Boolean    @default(false)
+  cancellationReason String?
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
@@ -243,6 +254,7 @@ model Job {
   user              User        @relation("JobUser", fields: [userId], references: [id])
   contractor        Contractor? @relation("JobContractor", fields: [contractorId], references: [id])
   quotes            Quote[]
+  acceptedQuoteRel  Quote?      @relation("AcceptedQuote", fields: [acceptedQuoteId], references: [id])
   assignments       JobAssignment[]
   reviews           Review[]    @relation("JobReview")
   payments          Payment[]
@@ -258,6 +270,14 @@ model Quote {
   jobId             String
   contractorId      String
   amount            Float
+  // New fields for v2.2
+  totalAmount       Float?
+  addOns            Json?
+  documents         String[]
+  meetingScheduledOn DateTime?
+  status            String      @default("pending")
+  advanceRequested  Boolean     @default(false)
+  advanceAmount     Float       @default(0)
   estimatedArrival  String?     
   notes             String?
   isAccepted        Boolean     @default(false)
@@ -268,6 +288,7 @@ model Quote {
   // Relations
   job               Job         @relation(fields: [jobId], references: [id], onDelete: Cascade)
   contractor        Contractor  @relation(fields: [contractorId], references: [id])
+  acceptedForJob    Job?        @relation("AcceptedQuote")
 
   @@map("quotes")
 }

@@ -672,8 +672,7 @@ class ContractorController {
               id: true,
               firstName: true,
               lastName: true,
-              phone: true,
-              rating: true
+              phone: true
             }
           },
           quotes: true,
@@ -737,7 +736,7 @@ class ContractorController {
             id: true,
             firstName: true,
             lastName: true,
-            rating: true
+              // rating field does not exist on User model
           }
         },
         quotes: {

@@ -65,6 +65,13 @@ class SocketService {
         console.log(`User ${socket.userId} joined job room ${jobId}`);
       });
 
+      // Join private chat room between user and contractor for a job
+      socket.on('join_chat_room', ({ jobId, userId, contractorId }) => {
+        const room = `chat_${jobId}_${userId}_${contractorId}`;
+        socket.join(room);
+        console.log(`User ${socket.userId} joined chat room ${room}`);
+      });
+
       // Leave job-specific rooms
       socket.on('leave_job_room', (jobId) => {
         socket.leave(`job_${jobId}`);
@@ -228,6 +235,13 @@ class SocketService {
         data,
         sentAt: notification.sentAt
       });
+
+      if (type === 'JOB_REQUEST' && data?.jobId) {
+        this.io.to(`user_${userId}`).emit('new_job_notification', {
+          jobId: data.jobId,
+          message: 'A new job is available near you!'
+        });
+      }
 
       return notification;
     } catch (error) {

@@ -45,6 +45,7 @@ router.delete('/jobs/:jobId', UserJobController.cancelJob);
 router.post('/jobs/:jobId/quotes/:quoteId/accept', UserJobController.acceptQuote);
 router.post('/jobs/:jobId/reviews', UserJobController.submitReview);
 router.get('/jobs/analytics', UserJobController.getJobAnalytics);
+router.get('/jobs/active', UserJobController.getActiveJob);
 
 // Location tracking routes
 router.get('/jobs/:jobId/locations/latest', UserJobController.getLatestLocation);

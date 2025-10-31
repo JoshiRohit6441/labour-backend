@@ -1,6 +1,7 @@
 import prisma from '../../config/database.js';
-import { generatePaginationMeta } from '../../utils/helpers.js';
+import { generatePaginationMeta, calculateDistance } from '../../utils/helpers.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
+import handleResponse from '../../utils/handleResponse.js';
 
 class JobController {
   // Create job
@@ -68,10 +69,63 @@ class JobController {
       }
     });
 
-    res.status(201).json({
-      message: 'Job created successfully',
-      job
-    });
+    // Notify nearby contractors who provide worker service in the area
+    try {
+      const requiredSkillsArray = Array.isArray(requiredSkills) ? requiredSkills : (requiredSkills ? [requiredSkills] : []);
+
+      // Get contractorIds that have workers matching any required skill (if skills provided)
+      let contractorIdsBySkill = [];
+      if (requiredSkillsArray.length > 0) {
+        const skillMatches = await prisma.worker.findMany({
+          where: { skills: { hasSome: requiredSkillsArray } },
+          select: { contractorId: true },
+          distinct: ['contractorId']
+        });
+        contractorIdsBySkill = skillMatches.map(s => s.contractorId);
+      }
+
+      // Fetch active contractors with location data (and skill match if applicable)
+      const contractors = await prisma.contractor.findMany({
+        where: {
+          isActive: true,
+          businessLatitude: { not: null },
+          businessLongitude: { not: null },
+          ...(contractorIdsBySkill.length > 0 ? { id: { in: contractorIdsBySkill } } : {})
+        },
+        select: { id: true, userId: true, coverageRadius: true, businessLatitude: true, businessLongitude: true }
+      });
+
+      const nearbyUserIds = contractors
+        .filter(c => {
+          const distKm = calculateDistance(
+            Number(job.latitude),
+            Number(job.longitude),
+            Number(c.businessLatitude),
+            Number(c.businessLongitude)
+          );
+          return isFinite(distKm) && distKm <= Number(c.coverageRadius);
+        })
+        .map(c => c.userId);
+
+      if (nearbyUserIds.length > 0) {
+        // Use SocketService to send real-time notifications + persist in DB
+        const socketService = req.app.get('socketService');
+        if (socketService && socketService.sendNotificationToUsers) {
+          await socketService.sendNotificationToUsers(
+            nearbyUserIds,
+            'JOB_REQUEST',
+            'New job near you',
+            `${job.title} • ${job.city}`,
+            { jobId: job.id, jobType: job.jobType, city: job.city, cta: 'SEE_JOB' }
+          );
+        }
+      }
+    } catch (e) {
+      // Non-blocking: log and continue
+      console.error('Failed to notify nearby contractors:', e);
+    }
+
+    return handleResponse(201, 'Job created successfully!', { job }, res);
   });
 
   // Get user's jobs
@@ -149,10 +203,7 @@ class JobController {
 
     const paginationMeta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
 
-    res.json({
-      jobs,
-      pagination: paginationMeta
-    });
+    return handleResponse(200, 'Jobs fetched successfully', { jobs, pagination: paginationMeta }, res);
   });
 
   // Get latest location updates for a job
@@ -184,13 +235,7 @@ class JobController {
       take: Math.min(parseInt(limit), 50)
     });
 
-    res.json({
-      jobId,
-      isLocationTracking: job.isLocationTracking,
-      jobType: job.jobType,
-      status: job.status,
-      updates
-    });
+    return handleResponse(200, 'Latest location updates fetched', { jobId, isLocationTracking: job.isLocationTracking, jobType: job.jobType, status: job.status, updates }, res);
   });
 
   // Enable/Disable location tracking on a job (user-owned)
@@ -215,10 +260,7 @@ class JobController {
       data: { isLocationTracking: Boolean(enabled) }
     });
 
-    res.json({
-      message: 'Tracking setting updated',
-      job: { id: updated.id, isLocationTracking: updated.isLocationTracking }
-    });
+    return handleResponse(200, 'Tracking setting updated', { job: { id: updated.id, isLocationTracking: updated.isLocationTracking } }, res);
   });
 
   // Get job details
@@ -337,7 +379,7 @@ class JobController {
       });
     }
 
-    res.json({ job });
+    return handleResponse(200, 'Job details fetched', { job }, res);
   });
 
   // Update job
@@ -384,17 +426,14 @@ class JobController {
       }
     });
 
-    res.json({
-      message: 'Job updated successfully',
-      job: updatedJob
-    });
+    return handleResponse(200, 'Job updated successfully', { job: updatedJob }, res);
   });
 
   // Cancel job
   static cancelJob = asyncHandler(async (req, res) => {
     const { jobId } = req.params;
     const userId = req.user.id;
-    const { reason } = req.body;
+    // const { reason } = req.body;
 
     // Check if job belongs to user
     const job = await prisma.job.findFirst({
@@ -429,10 +468,7 @@ class JobController {
     // TODO: Handle refunds if advance was paid
     // TODO: Notify contractor and workers
 
-    res.json({
-      message: 'Job cancelled successfully',
-      job: updatedJob
-    });
+    return handleResponse(200, 'Job cancelled successfully', { job: updatedJob }, res);
   });
 
   // Accept quote
@@ -473,28 +509,26 @@ class JobController {
       });
     }
 
-    // Update quote as accepted
-    await prisma.quote.update({
-      where: { id: quoteId },
-      data: { isAccepted: true }
-    });
+    // Single-winner acceptance: only when not already accepted
+    const [_, jobUpdate] = await prisma.$transaction([
+      prisma.quote.update({ where: { id: quoteId }, data: { isAccepted: true } }),
+      prisma.job.updateMany({
+        where: { id: jobId, contractorId: null, status: { in: ['PENDING', 'QUOTED'] } },
+        data: { status: 'ACCEPTED', contractorId: quote.contractorId, acceptedQuote: quote.amount }
+      })
+    ]);
 
-    // Update job with accepted contractor and quote
-    const updatedJob = await prisma.job.update({
+    if (jobUpdate.count === 0) {
+      return res.status(409).json({
+        error: 'Already accepted',
+        message: 'This job has already been accepted by another contractor'
+      });
+    }
+
+    const updatedJob = await prisma.job.findUnique({
       where: { id: jobId },
-      data: {
-        status: 'ACCEPTED',
-        contractorId: quote.contractorId,
-        acceptedQuote: quote.amount
-      },
       include: {
-        contractor: {
-          select: {
-            id: true,
-            businessName: true,
-            rating: true
-          }
-        }
+        contractor: { select: { id: true, businessName: true, rating: true } }
       }
     });
 
@@ -508,13 +542,23 @@ class JobController {
       }
     });
 
-    // TODO: Collect advance payment
-    // TODO: Notify contractor about acceptance
+    // Notify contractor about acceptance
+    try {
+      const socketService = req.app.get('socketService');
+      if (socketService && socketService.sendNotificationToUser) {
+        await socketService.sendNotificationToUser(
+          quote.contractor.userId,
+          'JOB_ACCEPTED',
+          'Your quote was accepted',
+          `${updatedJob?.title || 'Job'} was awarded to you`,
+          { jobId, contractorId: quote.contractorId, cta: 'SEE_JOB' }
+        );
+      }
+    } catch (e) {
+      console.error('Failed to notify contractor about quote acceptance:', e);
+    }
 
-    res.json({
-      message: 'Quote accepted successfully',
-      job: updatedJob
-    });
+    return handleResponse(200, 'Quote accepted successfully', { job: updatedJob }, res);
   });
 
   // Submit review for job
@@ -696,6 +740,17 @@ class JobController {
       jobsByType,
       monthlyStats
     });
+  });
+
+  // Get active (ongoing) job for persistent footer
+  static getActiveJob = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const job = await prisma.job.findFirst({
+      where: { userId, status: 'IN_PROGRESS' },
+      orderBy: { updatedAt: 'desc' },
+      select: { id: true, title: true, jobType: true, status: true, contractorId: true }
+    });
+    return handleResponse(200, 'Active job fetched', { job: job || null }, res);
   });
 }
 

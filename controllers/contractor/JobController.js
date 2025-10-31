@@ -35,8 +35,7 @@ class JobController {
               id: true,
               firstName: true,
               lastName: true,
-              phone: true,
-              rating: true
+              phone: true
             }
           },
           quotes: {
@@ -118,7 +117,7 @@ class JobController {
             id: true,
             firstName: true,
             lastName: true,
-            rating: true
+              // rating field does not exist on User model
           }
         },
         quotes: {
@@ -246,12 +245,106 @@ class JobController {
       });
     }
 
-    // TODO: Send notification to user about new quote
+    // Notify user about new quote
+    try {
+      const socketService = req.app.get('socketService');
+      if (socketService && socketService.sendNotificationToUser) {
+        await socketService.sendNotificationToUser(
+          job.userId,
+          'QUOTE_RECEIVED',
+          'You got a new quote',
+          `${contractor.businessName} quoted ₹${amount}`,
+          { jobId: jobId, quoteId: quote.id, cta: 'SEE_JOB' }
+        );
+      }
+    } catch (e) {
+      console.error('Failed to notify user for new quote:', e);
+    }
 
     res.status(201).json({
       message: 'Quote submitted successfully',
       quote
     });
+  });
+
+  // Claim job (single-winner) for IMMEDIATE and SCHEDULED
+  static claimJob = asyncHandler(async (req, res) => {
+    const { jobId } = req.params;
+    const { workerIds = [] } = req.body || {};
+    const userId = req.user.id;
+
+    const contractor = await prisma.contractor.findUnique({ where: { userId } });
+    if (!contractor) {
+      return res.status(404).json({
+        error: 'Contractor profile not found',
+        message: 'Please create a contractor profile first'
+      });
+    }
+
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found', message: 'The requested job was not found' });
+    }
+
+    if (!['IMMEDIATE', 'SCHEDULED'].includes(job.jobType)) {
+      return res.status(400).json({ error: 'Cannot claim job', message: 'Only IMMEDIATE or SCHEDULED jobs can be claimed by contractors' });
+    }
+
+    // ACID transaction: lock and assign workers atomically
+    const txResult = await prisma.$transaction(async (tx) => {
+      // lock via conditional update
+      const updatedCount = await tx.job.updateMany({
+        where: { id: jobId, contractorId: null, status: { in: ['PENDING', 'QUOTED'] } },
+        data: { contractorId: contractor.id, status: 'ACCEPTED' }
+      });
+
+      if (updatedCount.count === 0) {
+        return { ok: false };
+      }
+
+      // optionally validate worker assignment
+      if (workerIds && workerIds.length > 0) {
+        const workers = await tx.worker.findMany({
+          where: { id: { in: workerIds }, contractorId: contractor.id }
+        });
+        if (workers.length !== workerIds.length) {
+          throw new Error('Some workers do not belong to your contractor profile');
+        }
+        for (const wid of workerIds) {
+          await tx.jobAssignment.create({ data: { jobId, workerId: wid } });
+        }
+      }
+
+      await tx.chatRoom.update({
+        where: { jobId },
+        data: { participants: { connect: { id: userId } } }
+      });
+
+      return { ok: true };
+    });
+
+    if (!txResult.ok) {
+      return res.status(409).json({ error: 'Already accepted', message: 'This job has already been accepted by another contractor' });
+    }
+
+    // Notify user that job has been accepted
+    try {
+      const socketService = req.app.get('socketService');
+      if (socketService && socketService.sendNotificationToUser) {
+        await socketService.sendNotificationToUser(
+          job.userId,
+          'JOB_ACCEPTED',
+          'Your job was accepted',
+          `${contractor.businessName} accepted your job`,
+          { jobId, contractorId: contractor.id, cta: 'SEE_JOB' }
+        );
+      }
+    } catch (e) {
+      console.error('Failed to notify user for job accepted:', e);
+    }
+
+    const updated = await prisma.job.findUnique({ where: { id: jobId } });
+    return res.json({ message: 'Job claimed successfully', job: updated });
   });
 
   // Update quote
@@ -684,6 +777,21 @@ class JobController {
       jobsByType,
       monthlyStats
     });
+  });
+
+  // Get active (ongoing) job for persistent footer
+  static getActiveJob = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const contractor = await prisma.contractor.findUnique({ where: { userId } });
+    if (!contractor) {
+      return res.status(404).json({ error: 'Contractor profile not found', message: 'Please create a contractor profile first' });
+    }
+    const job = await prisma.job.findFirst({
+      where: { contractorId: contractor.id, status: 'IN_PROGRESS' },
+      orderBy: { updatedAt: 'desc' },
+      select: { id: true, title: true, jobType: true, status: true, userId: true }
+    });
+    return res.json({ job: job || null });
   });
 }
 

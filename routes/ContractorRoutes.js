@@ -45,12 +45,14 @@ router.delete('/rate-cards/:rateCardId', ContractorController.deleteRateCard);
 router.get('/jobs', validatePagination, ContractorJobController.getContractorJobs);
 router.get('/nearby-jobs', validatePagination, ContractorJobController.getNearbyJobs);
 router.get('/jobs/analytics', ContractorJobController.getJobAnalytics);
+router.get('/jobs/active', ContractorJobController.getActiveJob);
 router.post('/jobs/:jobId/quotes', ContractorJobController.submitQuote);
 router.put('/jobs/:jobId/quotes/:quoteId', ContractorJobController.updateQuote);
 router.delete('/jobs/:jobId/quotes/:quoteId', ContractorJobController.cancelQuote);
 router.post('/jobs/:jobId/start', ContractorJobController.startJob);
 router.post('/jobs/:jobId/complete', ContractorJobController.completeJob);
 router.post('/jobs/:jobId/assign-workers', ContractorJobController.assignWorkers);
+router.post('/jobs/:jobId/claim', ContractorJobController.claimJob);
 
 // Payment routes
 router.get('/payments/history', validatePagination, ContractorPaymentController.getPaymentHistory);
