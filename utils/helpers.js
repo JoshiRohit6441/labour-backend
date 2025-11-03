@@ -19,6 +19,33 @@ export const calculateDistance = (lat1, lon1, lat2, lon2) => {
   return distance;
 };
 
+// Find nearby contractors
+export const findNearbyContractors = async (prisma, jobLatitude, jobLongitude) => {
+  const allContractors = await prisma.contractor.findMany({
+    where: {
+      isActive: true,
+      businessLatitude: {
+        not: null
+      },
+      businessLongitude: {
+        not: null
+      }
+    }
+  });
+
+  const nearbyContractors = allContractors.filter(contractor => {
+    const distance = calculateDistance(
+      jobLatitude,
+      jobLongitude,
+      contractor.businessLatitude,
+      contractor.businessLongitude
+    );
+    return distance <= contractor.coverageRadius;
+  });
+
+  return nearbyContractors;
+}
+
 // Format phone number
 export const formatPhoneNumber = (phone) => {
   // Remove all non-digit characters

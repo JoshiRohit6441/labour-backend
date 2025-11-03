@@ -32,7 +32,7 @@ export const comparePassword = async (password, hashedPassword) => {
 // Store refresh token in Redis
 export const storeRefreshToken = async (userId, refreshToken) => {
   const key = `refresh_token:${userId}`;
-  await redisClient.setEx(key, 7 * 24 * 60 * 60, refreshToken); // 7 days
+  await redisClient.setEx(key, 7 * 24 * 60 * 60, refreshToken);
 };
 
 // Get refresh token from Redis

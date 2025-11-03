@@ -1,7 +1,8 @@
-import prisma from '../../config/database.js';
+// import prisma from '../../config/database.js';
 import { formatPhoneNumber, generatePaginationMeta, maskSensitiveData } from '../../utils/helpers.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 import { comparePassword, generateRefreshToken, generateToken, hashPassword, storeRefreshToken } from '../../utils/auth.js';
+import prisma from '../../config/database.js';
 
 class AdminController {
   // Register Admin

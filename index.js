@@ -15,6 +15,7 @@ import { generalLimiter } from './middleware/rateLimiter.js';
 
 // Import services
 import SocketService from './services/socketService.js';
+import './services/notificationWorker.js';
 
 dotenv.config();
 

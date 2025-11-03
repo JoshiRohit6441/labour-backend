@@ -1,5 +1,5 @@
 import rateLimit from 'express-rate-limit';
-import redisClient from '../config/redisConfig.js';
+ '../config/redisConfig.js';
 
 // General rate limiter
 export const generalLimiter = rateLimit({

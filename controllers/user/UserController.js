@@ -571,6 +571,150 @@ class UserController {
       pagination: paginationMeta
     });
   });
+
+  // Get chat rooms for user
+  static getChatRooms = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+
+    const chatRooms = await prisma.chatRoom.findMany({
+      where: {
+        participants: {
+          some: {
+            id: userId
+          }
+        }
+      },
+      include: {
+        job: {
+          select: {
+            id: true,
+            title: true,
+            status: true
+          }
+        },
+        participants: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            profileImage: true
+          }
+        },
+        messages: {
+          orderBy: {
+            createdAt: 'desc'
+          },
+          take: 1
+        }
+      },
+      orderBy: {
+        updatedAt: 'desc'
+      }
+    });
+
+    return handleResponse(200, 'Chat rooms fetched successfully', { chatRooms }, res);
+  });
+
+  // Get messages for a chat room
+  static getChatMessages = asyncHandler(async (req, res) => {
+    const { roomId } = req.params;
+    const { page = 1, limit = 20 } = req.query;
+    const userId = req.user.id;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const room = await prisma.chatRoom.findFirst({
+      where: {
+        id: roomId,
+        participants: {
+          some: { id: userId }
+        }
+      }
+    });
+
+    if (!room) {
+      return handleResponse(404, 'Chat room not found or access denied.', null, res);
+    }
+
+    const [messages, total] = await Promise.all([
+      prisma.chatMessage.findMany({
+        where: { chatRoomId: roomId },
+        include: {
+          sender: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              profileImage: true
+            }
+          }
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: parseInt(limit)
+      }),
+      prisma.chatMessage.count({ where: { chatRoomId: roomId } })
+    ]);
+
+    const paginationMeta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
+
+    return handleResponse(200, 'Messages fetched successfully', { messages: messages.reverse(), pagination: paginationMeta }, res);
+  });
+
+  // Get dashboard stats
+  static getDashboardStats = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+
+    const totalJobs = await prisma.job.count({
+      where: { userId },
+    });
+
+    const activeJobs = await prisma.job.count({
+      where: { userId, status: 'IN_PROGRESS' },
+    });
+
+    const completedJobs = await prisma.job.count({
+      where: { userId, status: 'COMPLETED' },
+    });
+
+    const totalSpent = await prisma.payment.aggregate({
+      where: {
+        userId,
+        status: 'COMPLETED',
+      },
+      _sum: {
+        amount: true,
+      },
+    });
+
+    res.json({
+      stats: {
+        totalJobs,
+        activeJobs,
+        completedJobs,
+        totalSpent: totalSpent._sum.amount || 0,
+      },
+    });
+  });
+
+  // Get recent jobs
+  static getRecentJobs = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+
+    const recentJobs = await prisma.job.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      include: {
+        contractor: {
+          select: {
+            businessName: true,
+          },
+        },
+      },
+    });
+
+    res.json({ recentJobs });
+  });
 }
 
 export default UserController;

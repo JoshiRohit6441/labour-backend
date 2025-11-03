@@ -23,7 +23,16 @@ class JobController {
       numberOfWorkers,
       requiredSkills,
       budget,
-      isLocationTracking = false
+      isLocationTracking = false,
+      // BIDDING fields
+      detailedDescription,
+      startDate,
+      siteVisitDeadline,
+      quoteSubmissionDeadline,
+      materialsProvidedBy,
+      expectedDays,
+      // SCHEDULED field
+      scheduledStartDate
     } = req.body;
 
     const job = await prisma.job.create({
@@ -39,12 +48,21 @@ class JobController {
         latitude: parseFloat(latitude),
         longitude: parseFloat(longitude),
         scheduledDate: scheduledDate ? new Date(scheduledDate) : null,
+        scheduledStartDate: jobType === 'SCHEDULED' && scheduledStartDate ? new Date(scheduledStartDate) : (jobType === 'SCHEDULED' && scheduledDate ? new Date(scheduledDate) : null),
         scheduledTime,
         estimatedDuration,
         numberOfWorkers,
+        workersNeeded: numberOfWorkers, // Save as workersNeeded too
         requiredSkills,
         budget,
-        isLocationTracking: jobType === 'IMMEDIATE' ? true : isLocationTracking
+        isLocationTracking: jobType === 'IMMEDIATE' ? true : isLocationTracking,
+        // BIDDING fields
+        detailedDescription,
+        startDate: startDate ? new Date(startDate) : null,
+        siteVisitDeadline: siteVisitDeadline ? new Date(siteVisitDeadline) : null,
+        quoteSubmissionDeadline: quoteSubmissionDeadline ? new Date(quoteSubmissionDeadline) : null,
+        materialsProvidedBy,
+        expectedDays: expectedDays ? parseInt(expectedDays) : null
       },
       include: {
         user: {
@@ -388,7 +406,6 @@ class JobController {
     const userId = req.user.id;
     const updateData = req.body;
 
-    // Check if job belongs to user
     const job = await prisma.job.findFirst({
       where: {
         id: jobId,
@@ -403,7 +420,6 @@ class JobController {
       });
     }
 
-    // Don't allow updates if job is already accepted or in progress
     if (['ACCEPTED', 'IN_PROGRESS', 'COMPLETED'].includes(job.status)) {
       return res.status(400).json({
         error: 'Cannot update job',
@@ -433,9 +449,8 @@ class JobController {
   static cancelJob = asyncHandler(async (req, res) => {
     const { jobId } = req.params;
     const userId = req.user.id;
-    // const { reason } = req.body;
+    const { reason } = req.body || {};
 
-    // Check if job belongs to user
     const job = await prisma.job.findFirst({
       where: {
         id: jobId,
@@ -450,7 +465,11 @@ class JobController {
       });
     }
 
-    // Don't allow cancellation if job is completed
+    // Validate reason
+    if (!reason || typeof reason !== 'string' || reason.trim().length < 5) {
+      return handleResponse(400, 'Cancellation reason is required (min 5 characters).', null, res);
+    }
+
     if (job.status === 'COMPLETED') {
       return res.status(400).json({
         error: 'Cannot cancel job',
@@ -461,12 +480,31 @@ class JobController {
     const updatedJob = await prisma.job.update({
       where: { id: jobId },
       data: {
-        status: 'CANCELLED'
+        status: 'CANCELLED',
+        cancellationReason: reason.trim()
       }
     });
 
-    // TODO: Handle refunds if advance was paid
-    // TODO: Notify contractor and workers
+    // Notify contractor (if assigned)
+    try {
+      if (job.contractorId) {
+        const contractor = await prisma.contractor.findUnique({ where: { id: job.contractorId }, select: { userId: true, businessName: true } });
+        if (contractor) {
+          const socketService = req.app.get('socketService');
+          if (socketService && socketService.sendNotificationToUser) {
+            await socketService.sendNotificationToUser(
+              contractor.userId,
+              'JOB_CANCELLED',
+              'Job was cancelled',
+              `The user cancelled the job${updatedJob.title ? `: ${updatedJob.title}` : ''}.`,
+              { jobId, reason: updatedJob.cancellationReason }
+            );
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Failed to notify contractor about job cancellation:', e);
+    }
 
     return handleResponse(200, 'Job cancelled successfully', { job: updatedJob }, res);
   });
@@ -485,10 +523,7 @@ class JobController {
     });
 
     if (!job) {
-      return res.status(404).json({
-        error: 'Job not found',
-        message: 'Job not found or you do not have permission to accept quotes'
-      });
+      return handleResponse(404, 'Job not found or you do not have permission to accept quotes', null, res);
     }
 
     // Check if quote exists and belongs to job
@@ -503,26 +538,31 @@ class JobController {
     });
 
     if (!quote) {
-      return res.status(404).json({
-        error: 'Quote not found',
-        message: 'Quote not found or does not belong to this job'
-      });
+      return handleResponse(404, 'Quote not found or does not belong to this job', null, res);
     }
 
-    // Single-winner acceptance: only when not already accepted
+    const allQuotes = await prisma.quote.findMany({
+      where: { jobId },
+      include: { contractor: { select: { userId: true } } }
+    });
+
+    const finalAmount = quote.totalAmount || quote.amount;
+
     const [_, jobUpdate] = await prisma.$transaction([
-      prisma.quote.update({ where: { id: quoteId }, data: { isAccepted: true } }),
+      prisma.quote.update({ where: { id: quoteId }, data: { isAccepted: true, status: 'accepted' } }),
       prisma.job.updateMany({
         where: { id: jobId, contractorId: null, status: { in: ['PENDING', 'QUOTED'] } },
-        data: { status: 'ACCEPTED', contractorId: quote.contractorId, acceptedQuote: quote.amount }
+        data: {
+          status: 'ACCEPTED',
+          contractorId: quote.contractorId,
+          acceptedQuote: finalAmount,
+          acceptedQuoteId: quoteId
+        }
       })
     ]);
 
     if (jobUpdate.count === 0) {
-      return res.status(409).json({
-        error: 'Already accepted',
-        message: 'This job has already been accepted by another contractor'
-      });
+      return handleResponse(409, 'This job has already been accepted by another contractor', null, res);
     }
 
     const updatedJob = await prisma.job.findUnique({
@@ -542,7 +582,6 @@ class JobController {
       }
     });
 
-    // Notify contractor about acceptance
     try {
       const socketService = req.app.get('socketService');
       if (socketService && socketService.sendNotificationToUser) {
@@ -553,9 +592,21 @@ class JobController {
           `${updatedJob?.title || 'Job'} was awarded to you`,
           { jobId, contractorId: quote.contractorId, cta: 'SEE_JOB' }
         );
+
+        for (const otherQuote of allQuotes) {
+          if (otherQuote.id !== quoteId && otherQuote.contractor.userId) {
+            await socketService.sendNotificationToUser(
+              otherQuote.contractor.userId,
+              'QUOTE_REJECTED',
+              'Your quote was not selected',
+              `Another contractor was selected for ${updatedJob?.title || 'the job'}`,
+              { jobId, quoteId: otherQuote.id }
+            );
+          }
+        }
       }
     } catch (e) {
-      console.error('Failed to notify contractor about quote acceptance:', e);
+      console.error('Failed to notify contractors about quote acceptance:', e);
     }
 
     return handleResponse(200, 'Quote accepted successfully', { job: updatedJob }, res);
@@ -567,7 +618,6 @@ class JobController {
     const userId = req.user.id;
     const { contractorRating, contractorComment, workerRatings } = req.body;
 
-    // Check if job belongs to user and is completed
     const job = await prisma.job.findFirst({
       where: {
         id: jobId,
@@ -591,7 +641,6 @@ class JobController {
       });
     }
 
-    // Check if user already submitted reviews for this job
     const existingReviews = await prisma.review.findMany({
       where: {
         jobId,
@@ -608,7 +657,6 @@ class JobController {
 
     const reviews = [];
 
-    // Create contractor review
     if (contractorRating && job.contractor) {
       const contractorReview = await prisma.review.create({
         data: {
@@ -623,7 +671,6 @@ class JobController {
       reviews.push(contractorReview);
     }
 
-    // Create worker reviews
     if (workerRatings && Array.isArray(workerRatings)) {
       for (const workerRating of workerRatings) {
         const worker = job.assignments.find(a => a.worker.id === workerRating.workerId);
@@ -649,7 +696,6 @@ class JobController {
     });
   });
 
-  // Get job analytics for user
   static getJobAnalytics = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const { startDate, endDate } = req.query;
@@ -670,14 +716,13 @@ class JobController {
       averageJobValue,
       monthlyStats
     ] = await Promise.all([
-      // Total jobs
       prisma.job.count({
         where: {
           userId,
           ...dateFilter
         }
       }),
-      // Jobs by status
+
       prisma.job.groupBy({
         by: ['status'],
         where: {
@@ -686,7 +731,7 @@ class JobController {
         },
         _count: { status: true }
       }),
-      // Jobs by type
+
       prisma.job.groupBy({
         by: ['jobType'],
         where: {
@@ -695,7 +740,7 @@ class JobController {
         },
         _count: { jobType: true }
       }),
-      // Total spent
+
       prisma.payment.aggregate({
         where: {
           userId,
@@ -704,7 +749,7 @@ class JobController {
         },
         _sum: { amount: true }
       }),
-      // Average job value
+
       prisma.job.aggregate({
         where: {
           userId,
@@ -713,7 +758,7 @@ class JobController {
         },
         _avg: { acceptedQuote: true }
       }),
-      // Monthly stats
+
       prisma.$queryRaw`
         SELECT 
           DATE_TRUNC('month', created_at) as month,
@@ -742,7 +787,6 @@ class JobController {
     });
   });
 
-  // Get active (ongoing) job for persistent footer
   static getActiveJob = asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const job = await prisma.job.findFirst({
@@ -751,6 +795,61 @@ class JobController {
       select: { id: true, title: true, jobType: true, status: true, contractorId: true }
     });
     return handleResponse(200, 'Active job fetched', { job: job || null }, res);
+  });
+
+  static changeStartDate = asyncHandler(async (req, res) => {
+    const { jobId } = req.params;
+    const { startDate } = req.body || {};
+    const userId = req.user.id;
+
+    if (!startDate || isNaN(Date.parse(startDate))) {
+      return handleResponse(400, 'Valid startDate is required (ISO date).', null, res);
+    }
+
+    const job = await prisma.job.findFirst({
+      where: { id: jobId, userId },
+      select: { id: true, jobType: true, status: true, contractorId: true, title: true }
+    });
+
+    if (!job) {
+      return handleResponse(404, 'Job not found or access denied.', null, res);
+    }
+
+    if (!['SCHEDULED', 'BIDDING'].includes(job.jobType)) {
+      return handleResponse(400, 'Date change allowed only for SCHEDULED or BIDDING jobs.', null, res);
+    }
+
+    if (job.status !== 'ACCEPTED') {
+      return handleResponse(400, 'Date can be changed only after acceptance.', null, res);
+    }
+
+    const updated = await prisma.job.update({
+      where: { id: jobId },
+      data: { startDate: new Date(startDate) }
+    });
+
+    // Notify contractor
+    try {
+      if (job.contractorId) {
+        const contractor = await prisma.contractor.findUnique({ where: { id: job.contractorId }, select: { userId: true, businessName: true } });
+        if (contractor) {
+          const socketService = req.app.get('socketService');
+          if (socketService && socketService.sendNotificationToUser) {
+            await socketService.sendNotificationToUser(
+              contractor.userId,
+              'JOB_DATE_CHANGED',
+              'Job start date updated',
+              `Start date updated for job${job.title ? `: ${job.title}` : ''}.`,
+              { jobId, startDate: updated.startDate }
+            );
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Failed to notify contractor about date change:', e);
+    }
+
+    return handleResponse(200, 'Start date updated successfully.', { job: { id: updated.id, startDate: updated.startDate } }, res);
   });
 }
 

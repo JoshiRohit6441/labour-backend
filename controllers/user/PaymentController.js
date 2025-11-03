@@ -26,29 +26,37 @@ class PaymentController {
     const { jobId, amount, paymentType } = req.body;
     const userId = req.user.id;
 
-    // Verify job exists and belongs to user
     const job = await prisma.job.findFirst({
-      where: {
-        id: jobId,
-        userId
-      }
+      where: { id: jobId, userId },
+      include: { quotes: { where: { id: { equals: prisma.job.fields.acceptedQuoteId } } } }
     });
 
     if (!job) {
-      return res.status(404).json({
-        error: 'Job not found',
-        message: 'Job not found or you do not have permission to make payments'
-      });
+      return handleResponse(404, 'Job not found or you do not have permission to make payments', null, res);
     }
 
-    // Calculate service charge
-    const serviceChargeRate = parseFloat(process.env.SERVICE_CHARGE_PERCENT || 5) / 100;
-    const serviceCharge = amount * serviceChargeRate;
-    const totalAmount = amount + serviceCharge;
+    let finalAmount = amount;
 
-    // Create Razorpay order
+    if (paymentType === 'ADVANCE') {
+      const acceptedQuote = job.quotes[0];
+      if (!acceptedQuote || !acceptedQuote.advanceRequested) {
+        return handleResponse(400, 'Advance payment has not been requested for this job.', null, res);
+      }
+      if (amount !== acceptedQuote.advanceAmount) {
+        return handleResponse(400, `Advance payment amount must be exactly ₹${acceptedQuote.advanceAmount}.`, null, res);
+      }
+      if (job.advancePaid > 0) {
+        return handleResponse(400, 'An advance payment has already been made for this job.', null, res);
+      }
+      finalAmount = acceptedQuote.advanceAmount;
+    }
+
+    const serviceChargeRate = parseFloat(process.env.SERVICE_CHARGE_PERCENT || 5) / 100;
+    const serviceCharge = finalAmount * serviceChargeRate;
+    const totalAmount = finalAmount + serviceCharge;
+
     const orderOptions = {
-      amount: Math.round(totalAmount * 100), // Convert to paise
+      amount: Math.round(totalAmount * 100),
       currency: 'INR',
       receipt: `job_${jobId}_${paymentType}_${Date.now()}`,
       notes: {
@@ -56,14 +64,13 @@ class PaymentController {
         userId,
         paymentType,
         serviceCharge,
-        netAmount: amount
+        netAmount: finalAmount
       }
     };
 
     try {
       const order = await razorpay.orders.create(orderOptions);
 
-      // Create payment record
       const payment = await prisma.payment.create({
         data: {
           jobId,
@@ -90,7 +97,7 @@ class PaymentController {
           paymentType: payment.paymentType,
           status: payment.status,
           serviceCharge,
-          netAmount: amount
+          netAmount: finalAmount
         }
       });
     } catch (error) {

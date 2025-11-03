@@ -1,6 +1,25 @@
+
 import prisma from '../../config/database.js';
 import { calculateDistance, generatePaginationMeta } from '../../utils/helpers.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
+import handleResponse from '../../utils/handleResponse.js';
+import cloudinary from '../../config/cloudinaryConfig.js';
+import notificationQueue from '../../config/queue.js';
+import redisClient from '../../config/redisConfig.js';
+
+// Helper to upload buffer to Cloudinary
+const uploadToCloudinary = (fileBuffer) => {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { resource_type: 'auto', folder: 'quote_documents' },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result);
+      }
+    );
+    uploadStream.end(fileBuffer);
+  });
+};
 
 class JobController {
   // Get contractor's jobs
@@ -16,10 +35,7 @@ class JobController {
     });
 
     if (!contractor) {
-      return res.status(404).json({
-        error: 'Contractor profile not found',
-        message: 'Please create a contractor profile first'
-      });
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
 
     const where = { contractorId: contractor.id };
@@ -72,10 +88,98 @@ class JobController {
 
     const paginationMeta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
 
-    res.json({
-      jobs,
-      pagination: paginationMeta
+    return handleResponse(200, 'Jobs fetched successfully', { jobs, pagination: paginationMeta }, res);
+  });
+
+  // Get job details for contractor
+  static getJobDetails = asyncHandler(async (req, res) => {
+    const { jobId } = req.params;
+    const userId = req.user.id;
+
+    const contractor = await prisma.contractor.findUnique({ where: { userId } });
+    if (!contractor) {
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
+    }
+
+    const cacheKey = `job:${jobId}`;
+    const cachedJob = await redisClient.get(cacheKey);
+
+    if (cachedJob) {
+      return handleResponse(200, 'Job details fetched from cache', { job: JSON.parse(cachedJob) }, res);
+    }
+
+    const job = await prisma.job.findUnique({
+      where: { id: jobId },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+            email: true
+          }
+        },
+        quotes: {
+          where: { contractorId: contractor.id },
+          include: {
+            contractor: {
+              select: {
+                id: true,
+                businessName: true,
+                rating: true
+              }
+            }
+          }
+        },
+        assignments: {
+          include: {
+            worker: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+                skills: true,
+                rating: true
+              }
+            }
+          }
+        },
+        chatRoom: {
+          include: {
+            participants: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true
+              }
+            },
+            messages: {
+              include: {
+                sender: {
+                  select: {
+                    id: true,
+                    firstName: true,
+                    lastName: true,
+                    role: true
+                  }
+                }
+              },
+              orderBy: { createdAt: 'desc' },
+              take: 20
+            }
+          }
+        }
+      }
     });
+
+    if (!job) {
+      return handleResponse(404, 'Job not found', null, res);
+    }
+
+    await redisClient.set(cacheKey, JSON.stringify(job), { EX: 3600 }); // Cache for 1 hour
+
+    return handleResponse(200, 'Job details fetched', { job }, res);
   });
 
   // Get nearby jobs for contractor
@@ -91,10 +195,7 @@ class JobController {
     });
 
     if (!contractor) {
-      return res.status(404).json({
-        error: 'Contractor profile not found',
-        message: 'Please create a contractor profile first'
-      });
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
 
     const where = {
@@ -108,34 +209,53 @@ class JobController {
       };
     }
 
-    // Get all jobs matching criteria
-    const allJobs = await prisma.job.findMany({
-      where,
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-              // rating field does not exist on User model
-          }
-        },
-        quotes: {
-          where: { contractorId: contractor.id }
-        }
-      }
-    });
-
-    // Filter jobs by distance
-    const nearbyJobs = allJobs.filter(job => {
-      const distance = calculateDistance(
-        parseFloat(latitude),
+    let nearbyJobs = [];
+    if (process.env.USE_POSTGIS === 'true') {
+      // Use PostGIS for efficient geo query
+      const rMeters = parseFloat(radius) * 1000;
+      const rawJobs = await prisma.$queryRawUnsafe(
+        `SELECT j.* FROM jobs j 
+         WHERE j.status IN ('PENDING','QUOTED') 
+           AND j.job_type IN ('IMMEDIATE','BIDDING')
+           AND ST_DWithin(
+             ST_SetSRID(ST_Point(j.longitude, j.latitude), 4326)::geography,
+             ST_SetSRID(ST_Point($1, $2), 4326)::geography,
+             $3
+           )`,
         parseFloat(longitude),
-        job.latitude,
-        job.longitude
+        parseFloat(latitude),
+        rMeters
       );
-      return distance <= parseFloat(radius);
-    });
+      // Hydrate quotes for this contractor
+      const jobIds = rawJobs.map(j => j.id);
+      const quotes = await prisma.quote.findMany({ where: { jobId: { in: jobIds }, contractorId: contractor.id } });
+      const quoteMap = new Map(quotes.map(q => [q.jobId, q]));
+      nearbyJobs = rawJobs.map(j => ({ ...j, quotes: quoteMap.get(j.id) ? [quoteMap.get(j.id)] : [] }));
+    } else {
+      // Fallback to Haversine filtering
+      const allJobs = await prisma.job.findMany({
+        where,
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+            }
+          },
+          quotes: { where: { contractorId: contractor.id } }
+        }
+      });
+      nearbyJobs = allJobs.filter(job => {
+        const distance = calculateDistance(
+          parseFloat(latitude),
+          parseFloat(longitude),
+          job.latitude,
+          job.longitude
+        );
+        return distance <= parseFloat(radius);
+      });
+    }
 
     // Sort by distance and paginate
     const sortedJobs = nearbyJobs
@@ -158,72 +278,61 @@ class JobController {
 
     const paginationMeta = generatePaginationMeta(parseInt(page), parseInt(limit), nearbyJobs.length);
 
-    res.json({
-      jobs: sortedJobs,
-      pagination: paginationMeta
-    });
+    return handleResponse(200, 'Nearby jobs fetched successfully', { jobs: sortedJobs, pagination: paginationMeta }, res);
   });
 
   // Submit quote for job
   static submitQuote = asyncHandler(async (req, res) => {
     const { jobId } = req.params;
     const userId = req.user.id;
-    const { amount, estimatedArrival, notes } = req.body;
+    const { totalAmount, notes, addOns, meetingScheduledOn } = req.body;
+    const files = req.files;
 
-    // Get contractor
-    const contractor = await prisma.contractor.findUnique({
-      where: { userId }
-    });
-
+    const contractor = await prisma.contractor.findUnique({ where: { userId } });
     if (!contractor) {
-      return res.status(404).json({
-        error: 'Contractor profile not found',
-        message: 'Please create a contractor profile first'
-      });
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
 
-    // Check if job exists and is in correct status
-    const job = await prisma.job.findUnique({
-      where: { id: jobId }
-    });
-
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
     if (!job) {
-      return res.status(404).json({
-        error: 'Job not found',
-        message: 'The requested job was not found'
-      });
+      return handleResponse(404, 'The requested job was not found', null, res);
     }
 
     if (job.status !== 'PENDING' && job.status !== 'QUOTED') {
-      return res.status(400).json({
-        error: 'Cannot submit quote',
-        message: 'Job is not accepting quotes in its current status'
-      });
+      return handleResponse(400, 'Job is not accepting quotes in its current status', null, res);
     }
 
-    // Check if contractor already submitted a quote
-    const existingQuote = await prisma.quote.findFirst({
-      where: {
-        jobId,
-        contractorId: contractor.id
+    let documentUrls = [];
+    if (files && files.length > 0) {
+      try {
+        const uploadPromises = files.map(file => uploadToCloudinary(file.buffer));
+        const uploadResults = await Promise.all(uploadPromises);
+        documentUrls = uploadResults.map(result => result.secure_url);
+      } catch (error) {
+        console.error('Cloudinary upload failed:', error);
+        return handleResponse(500, 'Failed to upload documents.', null, res);
       }
-    });
-
-    if (existingQuote) {
-      return res.status(409).json({
-        error: 'Quote already exists',
-        message: 'You have already submitted a quote for this job'
-      });
     }
 
-    const quote = await prisma.quote.create({
-      data: {
-        jobId,
-        contractorId: contractor.id,
-        amount,
-        estimatedArrival,
-        notes
+    const quoteData = {
+      jobId,
+      contractorId: contractor.id,
+      totalAmount: parseFloat(totalAmount),
+      notes,
+      addOns: addOns ? JSON.parse(addOns) : undefined,
+      documents: documentUrls,
+      meetingScheduledOn: meetingScheduledOn ? new Date(meetingScheduledOn) : undefined,
+    };
+
+    const quote = await prisma.quote.upsert({
+      where: {
+        jobId_contractorId: {
+          jobId: jobId,
+          contractorId: contractor.id
+        }
       },
+      update: quoteData,
+      create: quoteData,
       include: {
         contractor: {
           select: {
@@ -237,15 +346,10 @@ class JobController {
       }
     });
 
-    // Update job status to QUOTED if it was PENDING
     if (job.status === 'PENDING') {
-      await prisma.job.update({
-        where: { id: jobId },
-        data: { status: 'QUOTED' }
-      });
+      await prisma.job.update({ where: { id: jobId }, data: { status: 'QUOTED' } });
     }
 
-    // Notify user about new quote
     try {
       const socketService = req.app.get('socketService');
       if (socketService && socketService.sendNotificationToUser) {
@@ -253,7 +357,7 @@ class JobController {
           job.userId,
           'QUOTE_RECEIVED',
           'You got a new quote',
-          `${contractor.businessName} quoted ₹${amount}`,
+          `${contractor.businessName} quoted ₹${totalAmount}`,
           { jobId: jobId, quoteId: quote.id, cta: 'SEE_JOB' }
         );
       }
@@ -261,10 +365,61 @@ class JobController {
       console.error('Failed to notify user for new quote:', e);
     }
 
-    res.status(201).json({
-      message: 'Quote submitted successfully',
-      quote
+    return handleResponse(201, 'Quote submitted successfully', { quote }, res);
+  });
+
+  // Initiate pre-acceptance chat (SCHEDULED/BIDDING)
+  static initiateChat = asyncHandler(async (req, res) => {
+    const { jobId } = req.params;
+    const userId = req.user.id;
+
+    const contractor = await prisma.contractor.findUnique({ where: { userId } });
+    if (!contractor) {
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
+    }
+
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
+    if (!job) {
+      return handleResponse(404, 'The requested job was not found', null, res);
+    }
+
+    if (!['SCHEDULED', 'BIDDING'].includes(job.jobType)) {
+      return handleResponse(400, 'Chat is allowed pre-acceptance only for SCHEDULED or BIDDING jobs', null, res);
+    }
+
+    // Ensure chat room exists and add both participants (user is already connected on job create)
+    const room = await prisma.chatRoom.upsert({
+      where: { jobId },
+      update: {},
+      create: { jobId }
     });
+
+    await prisma.chatRoom.update({
+      where: { id: room.id },
+      data: {
+        participants: {
+          connect: [{ id: userId }]
+        }
+      }
+    });
+
+    // Notify user about chat initiation (optional)
+    try {
+      const socketService = req.app.get('socketService');
+      if (socketService && socketService.sendNotificationToUser) {
+        await socketService.sendNotificationToUser(
+          job.userId,
+          'CHAT_INITIATED',
+          'Contractor initiated chat',
+          'A contractor wants to discuss your job',
+          { jobId, contractorId: contractor.id, cta: 'SEE_JOB' }
+        );
+      }
+    } catch (e) {
+      // non-blocking
+    }
+
+    return handleResponse(200, 'Chat ready', { room: { id: room.id } }, res);
   });
 
   // Claim job (single-winner) for IMMEDIATE and SCHEDULED
@@ -275,19 +430,25 @@ class JobController {
 
     const contractor = await prisma.contractor.findUnique({ where: { userId } });
     if (!contractor) {
-      return res.status(404).json({
-        error: 'Contractor profile not found',
-        message: 'Please create a contractor profile first'
-      });
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
 
     const job = await prisma.job.findUnique({ where: { id: jobId } });
     if (!job) {
-      return res.status(404).json({ error: 'Job not found', message: 'The requested job was not found' });
+      return handleResponse(404, 'The requested job was not found', null, res);
     }
 
     if (!['IMMEDIATE', 'SCHEDULED'].includes(job.jobType)) {
-      return res.status(400).json({ error: 'Cannot claim job', message: 'Only IMMEDIATE or SCHEDULED jobs can be claimed by contractors' });
+      return handleResponse(400, 'Only IMMEDIATE or SCHEDULED jobs can be claimed by contractors', null, res);
+    }
+
+    // Validate worker count requirement
+    const workersRequired = job.workersNeeded || job.numberOfWorkers || 1;
+    if (!workerIds || workerIds.length === 0) {
+      return handleResponse(400, `This job requires ${workersRequired} worker(s). Please select workers.`, null, res);
+    }
+    if (workerIds.length < workersRequired) {
+      return handleResponse(400, `This job requires at least ${workersRequired} worker(s). You selected ${workerIds.length}.`, null, res);
     }
 
     // ACID transaction: lock and assign workers atomically
@@ -302,8 +463,24 @@ class JobController {
         return { ok: false };
       }
 
-      // optionally validate worker assignment
+      // Validate and assign workers
       if (workerIds && workerIds.length > 0) {
+        // For SCHEDULED jobs, check worker availability
+        if (job.jobType === 'SCHEDULED' && job.scheduledStartDate) {
+          const scheduledDate = new Date(job.scheduledStartDate);
+          const unavailableWorkers = await tx.availability.findMany({
+            where: {
+              workerId: { in: workerIds },
+              date: scheduledDate,
+              isAvailable: false
+            },
+            select: { workerId: true }
+          });
+          if (unavailableWorkers.length > 0) {
+            throw new Error(`Some selected workers are not available on ${scheduledDate.toLocaleDateString()}`);
+          }
+        }
+
         const workers = await tx.worker.findMany({
           where: { id: { in: workerIds }, contractorId: contractor.id }
         });
@@ -315,16 +492,21 @@ class JobController {
         }
       }
 
-      await tx.chatRoom.update({
+      // Create or update chat room and connect participants
+      const chatRoom = await tx.chatRoom.upsert({
         where: { jobId },
-        data: { participants: { connect: { id: userId } } }
+        update: { participants: { connect: [{ id: userId }, { id: job.userId }] } },
+        create: {
+          jobId,
+          participants: { connect: [{ id: userId }, { id: job.userId }] }
+        },
       });
 
       return { ok: true };
     });
 
     if (!txResult.ok) {
-      return res.status(409).json({ error: 'Already accepted', message: 'This job has already been accepted by another contractor' });
+      return handleResponse(409, 'This job has already been accepted by another contractor', null, res);
     }
 
     // Notify user that job has been accepted
@@ -338,13 +520,19 @@ class JobController {
           `${contractor.businessName} accepted your job`,
           { jobId, contractorId: contractor.id, cta: 'SEE_JOB' }
         );
+        // Also emit the job_accepted event for frontend listeners
+        socketService.io.to(`user_${job.userId}`).emit('job_accepted', {
+          jobId,
+          message: `${contractor.businessName} accepted your job`,
+          contractorName: contractor.businessName
+        });
       }
     } catch (e) {
       console.error('Failed to notify user for job accepted:', e);
     }
 
     const updated = await prisma.job.findUnique({ where: { id: jobId } });
-    return res.json({ message: 'Job claimed successfully', job: updated });
+    return handleResponse(200, 'Job claimed successfully', { job: updated }, res);
   });
 
   // Update quote
@@ -359,10 +547,7 @@ class JobController {
     });
 
     if (!contractor) {
-      return res.status(404).json({
-        error: 'Contractor profile not found',
-        message: 'Please create a contractor profile first'
-      });
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
 
     // Check if quote exists and belongs to contractor
@@ -375,17 +560,11 @@ class JobController {
     });
 
     if (!quote) {
-      return res.status(404).json({
-        error: 'Quote not found',
-        message: 'Quote not found or you do not have permission to update it'
-      });
+      return handleResponse(404, 'Quote not found or you do not have permission to update it', null, res);
     }
 
     if (quote.isAccepted) {
-      return res.status(400).json({
-        error: 'Cannot update quote',
-        message: 'Cannot update an accepted quote'
-      });
+      return handleResponse(400, 'Cannot update an accepted quote', null, res);
     }
 
     const updatedQuote = await prisma.quote.update({
@@ -406,10 +585,44 @@ class JobController {
       }
     });
 
-    res.json({
-      message: 'Quote updated successfully',
-      quote: updatedQuote
+    return handleResponse(200, 'Quote updated successfully', { quote: updatedQuote }, res);
+  });
+
+  // Request advance (<= 20% of totalAmount)
+  static requestAdvance = asyncHandler(async (req, res) => {
+    const { jobId, quoteId } = req.params;
+    const { amount } = req.body || {};
+    const userId = req.user.id;
+
+    if (!amount || isNaN(amount) || Number(amount) <= 0) {
+      return handleResponse(400, 'Advance amount must be a positive number', null, res);
+    }
+
+    const contractor = await prisma.contractor.findUnique({ where: { userId } });
+    if (!contractor) {
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
+    }
+
+    const quote = await prisma.quote.findFirst({ where: { id: quoteId, jobId, contractorId: contractor.id } });
+    if (!quote) {
+      return handleResponse(404, 'Quote not found or access denied', null, res);
+    }
+
+    if (!quote.totalAmount || quote.totalAmount <= 0) {
+      return handleResponse(400, 'Cannot request advance without totalAmount on quote', null, res);
+    }
+
+    const limit = quote.totalAmount * 0.20;
+    if (Number(amount) > limit) {
+      return handleResponse(400, 'Advance cannot exceed 20% of the total amount.', null, res);
+    }
+
+    const updated = await prisma.quote.update({
+      where: { id: quoteId },
+      data: { advanceRequested: true, advanceAmount: Number(amount) }
     });
+
+    return handleResponse(200, 'Advance request recorded', { quote: { id: updated.id, advanceRequested: updated.advanceRequested, advanceAmount: updated.advanceAmount } }, res);
   });
 
   // Cancel quote
@@ -423,10 +636,7 @@ class JobController {
     });
 
     if (!contractor) {
-      return res.status(404).json({
-        error: 'Contractor profile not found',
-        message: 'Please create a contractor profile first'
-      });
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
 
     // Check if quote exists and belongs to contractor
@@ -439,17 +649,11 @@ class JobController {
     });
 
     if (!quote) {
-      return res.status(404).json({
-        error: 'Quote not found',
-        message: 'Quote not found or you do not have permission to cancel it'
-      });
+      return handleResponse(404, 'Quote not found or you do not have permission to cancel it', null, res);
     }
 
     if (quote.isAccepted) {
-      return res.status(400).json({
-        error: 'Cannot cancel quote',
-        message: 'Cannot cancel an accepted quote'
-      });
+      return handleResponse(400, 'Cannot cancel an accepted quote', null, res);
     }
 
     await prisma.quote.delete({
@@ -458,9 +662,7 @@ class JobController {
 
     // TODO: Send notification to user about quote cancellation
 
-    res.json({
-      message: 'Quote cancelled successfully'
-    });
+    return handleResponse(200, 'Quote cancelled successfully', null, res);
   });
 
   // Start job
@@ -474,10 +676,7 @@ class JobController {
     });
 
     if (!contractor) {
-      return res.status(404).json({
-        error: 'Contractor profile not found',
-        message: 'Please create a contractor profile first'
-      });
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
 
     // Check if job exists and belongs to contractor
@@ -489,17 +688,11 @@ class JobController {
     });
 
     if (!job) {
-      return res.status(404).json({
-        error: 'Job not found',
-        message: 'Job not found or you do not have permission to start it'
-      });
+      return handleResponse(404, 'Job not found or you do not have permission to start it', null, res);
     }
 
     if (job.status !== 'ACCEPTED') {
-      return res.status(400).json({
-        error: 'Cannot start job',
-        message: 'Job must be accepted before it can be started'
-      });
+      return handleResponse(400, 'Job must be accepted before it can be started', null, res);
     }
 
     const updatedJob = await prisma.job.update({
@@ -507,21 +700,35 @@ class JobController {
       data: { status: 'IN_PROGRESS' }
     });
 
+    const cacheKey = `job:${jobId}`;
+    await redisClient.del(cacheKey);
+
     // Update job assignments
     await prisma.jobAssignment.updateMany({
       where: { jobId },
-      data: { 
+      data: {
         status: 'started',
         startedAt: new Date()
       }
     });
 
     // TODO: Send notification to user that job has started
+    try {
+      const socketService = req.app.get('socketService');
+      if (socketService && socketService.sendNotificationToUser) {
+        await socketService.sendNotificationToUser(
+          job.userId,
+          'JOB_STARTED',
+          'Your job has started',
+          `The contractor has started working on your job: ${job.title}`,
+          { jobId: job.id, cta: 'SEE_JOB' }
+        );
+      }
+    } catch (e) {
+      console.error('Failed to notify user about job start:', e);
+    }
 
-    res.json({
-      message: 'Job started successfully',
-      job: updatedJob
-    });
+    return handleResponse(200, 'Job started successfully', { job: updatedJob }, res);
   });
 
   // Complete job
@@ -535,10 +742,7 @@ class JobController {
     });
 
     if (!contractor) {
-      return res.status(404).json({
-        error: 'Contractor profile not found',
-        message: 'Please create a contractor profile first'
-      });
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
 
     // Check if job exists and belongs to contractor
@@ -550,17 +754,11 @@ class JobController {
     });
 
     if (!job) {
-      return res.status(404).json({
-        error: 'Job not found',
-        message: 'Job not found or you do not have permission to complete it'
-      });
+      return handleResponse(404, 'Job not found or you do not have permission to complete it', null, res);
     }
 
     if (job.status !== 'IN_PROGRESS') {
-      return res.status(400).json({
-        error: 'Cannot complete job',
-        message: 'Job must be in progress before it can be completed'
-      });
+      return handleResponse(400, 'Job must be in progress before it can be completed', null, res);
     }
 
     const updatedJob = await prisma.job.update({
@@ -568,10 +766,13 @@ class JobController {
       data: { status: 'COMPLETED' }
     });
 
+    const cacheKey = `job:${jobId}`;
+    await redisClient.del(cacheKey);
+
     // Update job assignments
     await prisma.jobAssignment.updateMany({
       where: { jobId },
-      data: { 
+      data: {
         status: 'completed',
         completedAt: new Date()
       }
@@ -587,12 +788,23 @@ class JobController {
 
     // TODO: Process final payment
     // TODO: Send notification to user that job is completed
+    try {
+      const socketService = req.app.get('socketService');
+      if (socketService && socketService.sendNotificationToUser) {
+        await socketService.sendNotificationToUser(
+          job.userId,
+          'JOB_COMPLETED',
+          'Your job has been completed',
+          `The contractor has completed your job: ${job.title}`,
+          { jobId: job.id, cta: 'SEE_JOB' }
+        );
+      }
+    } catch (e) {
+      console.error('Failed to notify user about job completion:', e);
+    }
     // TODO: Request reviews
 
-    res.json({
-      message: 'Job completed successfully',
-      job: updatedJob
-    });
+    return handleResponse(200, 'Job completed successfully', { job: updatedJob }, res);
   });
 
   // Assign workers to job
@@ -607,10 +819,7 @@ class JobController {
     });
 
     if (!contractor) {
-      return res.status(404).json({
-        error: 'Contractor profile not found',
-        message: 'Please create a contractor profile first'
-      });
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
 
     // Check if job exists and belongs to contractor
@@ -622,10 +831,7 @@ class JobController {
     });
 
     if (!job) {
-      return res.status(404).json({
-        error: 'Job not found',
-        message: 'Job not found or you do not have permission to assign workers'
-      });
+      return handleResponse(404, 'Job not found or you do not have permission to assign workers', null, res);
     }
 
     // Verify workers belong to contractor
@@ -637,10 +843,7 @@ class JobController {
     });
 
     if (workers.length !== workerIds.length) {
-      return res.status(400).json({
-        error: 'Invalid workers',
-        message: 'Some workers do not belong to your contractor profile'
-      });
+      return handleResponse(400, 'Some workers do not belong to your contractor profile', null, res);
     }
 
     // Create job assignments
@@ -666,10 +869,7 @@ class JobController {
       )
     );
 
-    res.status(201).json({
-      message: 'Workers assigned successfully',
-      assignments
-    });
+    return handleResponse(201, 'Workers assigned successfully', { assignments }, res);
   });
 
   // Get job analytics for contractor
@@ -683,10 +883,7 @@ class JobController {
     });
 
     if (!contractor) {
-      return res.status(404).json({
-        error: 'Contractor profile not found',
-        message: 'Please create a contractor profile first'
-      });
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
 
     const dateFilter = {};
@@ -767,7 +964,7 @@ class JobController {
       `
     ]);
 
-    res.json({
+    return handleResponse(200, 'Analytics fetched successfully', {
       analytics: {
         totalJobs,
         averageJobValue: averageJobValue._avg.acceptedQuote || 0,
@@ -776,7 +973,7 @@ class JobController {
       jobsByStatus,
       jobsByType,
       monthlyStats
-    });
+    }, res);
   });
 
   // Get active (ongoing) job for persistent footer
@@ -784,16 +981,118 @@ class JobController {
     const userId = req.user.id;
     const contractor = await prisma.contractor.findUnique({ where: { userId } });
     if (!contractor) {
-      return res.status(404).json({ error: 'Contractor profile not found', message: 'Please create a contractor profile first' });
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
     const job = await prisma.job.findFirst({
       where: { contractorId: contractor.id, status: 'IN_PROGRESS' },
       orderBy: { updatedAt: 'desc' },
       select: { id: true, title: true, jobType: true, status: true, userId: true }
     });
-    return res.json({ job: job || null });
+    return handleResponse(200, 'Active job fetched', { job: job || null }, res);
+  });
+
+  static cancelJob = asyncHandler(async (req, res) => {
+    const { jobId } = req.params;
+    const userId = req.user.id;
+    const { reason } = req.body || {};
+
+    const contractor = await prisma.contractor.findUnique({ where: { userId } });
+    if (!contractor) {
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
+    }
+
+    const job = await prisma.job.findFirst({
+      where: {
+        id: jobId,
+        contractorId: contractor.id,
+      },
+    });
+
+    if (!job) {
+      return handleResponse(404, 'Job not found or you do not have permission to cancel it', null, res);
+    }
+
+    if (!reason || typeof reason !== 'string' || reason.trim().length < 5) {
+      return handleResponse(400, 'Cancellation reason is required (min 5 characters).', null, res);
+    }
+
+    if (job.status === 'COMPLETED') {
+      return handleResponse(400, 'Cannot cancel a completed job', null, res);
+    }
+
+    const updatedJob = await prisma.job.update({
+      where: { id: jobId },
+      data: {
+        status: 'CANCELLED',
+        cancellationReason: reason.trim(),
+        cancelledBy: 'CONTRACTOR',
+      },
+    });
+
+    // Notify user
+    try {
+      const socketService = req.app.get('socketService');
+      if (socketService && socketService.sendNotificationToUser) {
+        await socketService.sendNotificationToUser(
+          job.userId,
+          'JOB_CANCELLED',
+          'Job was cancelled',
+          `The contractor cancelled the job${updatedJob.title ? `: ${updatedJob.title}` : ''}.`,
+          { jobId, reason: updatedJob.cancellationReason }
+        );
+      }
+    } catch (e) {
+      console.error('Failed to notify user about job cancellation:', e);
+    }
+
+    return handleResponse(200, 'Job cancelled successfully', { job: updatedJob }, res);
+  });
+
+  static shareLocation = asyncHandler(async (req, res) => {
+    const { jobId } = req.params;
+    const { workerPhone } = req.body;
+    const userId = req.user.id;
+
+    const contractor = await prisma.contractor.findUnique({ where: { userId } });
+    if (!contractor) {
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
+    }
+
+    const job = await prisma.job.findFirst({
+      where: {
+        id: jobId,
+        contractorId: contractor.id,
+      },
+    });
+
+    if (!job) {
+      return handleResponse(404, 'Job not found or you do not have permission to share its location', null, res);
+    }
+
+    const securityCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 3600000); // 1 hour from now
+
+    const updatedJob = await prisma.job.update({
+      where: { id: jobId },
+      data: {
+        locationSharingCode: securityCode,
+        locationSharingWorkerPhone: workerPhone,
+        locationSharingCodeExpiresAt: expiresAt,
+      },
+    });
+
+    await notificationQueue.add('send-sms', {
+      type: 'sms',
+      data: {
+        phone: workerPhone,
+        message: `Your security code for job ${job.title} is ${securityCode}`,
+      }
+    });
+
+    return handleResponse(200, 'Location shared successfully', { job: updatedJob }, res);
   });
 }
+
 
 export default JobController;
 
