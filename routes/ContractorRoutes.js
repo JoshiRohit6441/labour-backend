@@ -7,10 +7,36 @@ import NotificationController from '../controllers/contractor/NotificationContro
 import PaymentController from '../controllers/contractor/PaymentController.js';
 import MeetingController from '../controllers/contractor/MeetingController.js';
 import ChatController from '../controllers/chat/ChatController.js';
+import ContractorController from '../controllers/contractor/ContractorController.js';
 
 const router = express.Router();
 
 router.use(authenticateToken, requireRole(['CONTRACTOR']));
+
+// Profile Routes
+router.get('/profile', ContractorController.getProfile);
+router.post('/profile', ContractorController.createProfile);
+router.put('/profile', ContractorController.updateProfile);
+
+// Worker Routes
+router.post('/workers', ContractorController.addWorker);
+router.get('/workers', ContractorController.getWorkers);
+router.put('/workers/:workerId', ContractorController.updateWorker);
+router.delete('/workers/:workerId', ContractorController.deleteWorker);
+router.post('/workers/:workerId/availability', ContractorController.setWorkerAvailability);
+router.get('/workers/:workerId/availability', ContractorController.getWorkerAvailability);
+
+// Rate Card Routes
+router.post('/rate-cards', ContractorController.createRateCard);
+router.get('/rate-cards', ContractorController.getRateCards);
+router.put('/rate-cards/:rateCardId', ContractorController.updateRateCard);
+router.delete('/rate-cards/:rateCardId', ContractorController.deleteRateCard);
+
+// Job Routes
+// router.get('/jobs', ContractorController.getJobs);
+// router.get('/jobs/nearby', ContractorController.getNearbyJobs);
+
+
 
 // Job Routes
 router.get('/jobs', JobController.getContractorJobs);
@@ -28,6 +54,7 @@ router.put('/jobs/:jobId/quotes/:quoteId', JobController.updateQuote);
 router.delete('/jobs/:jobId/quotes/:quoteId', JobController.cancelQuote);
 router.post('/jobs/:jobId/quotes/:quoteId/request-advance', JobController.requestAdvance);
 router.post('/jobs/:jobId/share-location', JobController.shareLocation);
+router.post('/jobs/:jobId/initiate-chat', JobController.initiateChat);
 
 // Location Routes
 router.post('/jobs/:jobId/start-travel', LocationController.startTravel);

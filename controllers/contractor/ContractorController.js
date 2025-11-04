@@ -535,7 +535,6 @@ class ContractorController {
   static getRateCards = asyncHandler(async (req, res) => {
     const userId = req.user.id;
 
-    // Get contractor
     const contractor = await prisma.contractor.findUnique({
       where: { userId }
     });
