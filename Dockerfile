@@ -18,4 +18,5 @@ RUN npx prisma generate
 EXPOSE 8000
 
 # Run app
-CMD ["npm", "start"]
+# CMD ["npm", "start"]
+CMD ["node", "index.js"]
