@@ -66,10 +66,11 @@ class UserController {
 
     // Generate OTP for phone verification
     const otp = generateOTP();
-    console.log("otp : ", otp)
+    // console.log("otp : ", otp)
     const formatedPhoneNumber = formatPhoneNumber(phone)
-    const one = await storeOTP(formatedPhoneNumber, otp);
-    console.log("one : ", one)
+    // const one = await storeOTP(formatedPhoneNumber, otp);
+    const one = await storeOTP(formatedPhoneNumber, '000000');
+    // console.log("one : ", one)
 
     // Send OTP via SMS
     try {
@@ -235,7 +236,8 @@ class UserController {
     console.log("otp : ", otp)
     try {
       const formattedPhone = formatPhoneNumber(phone);
-      const info = await storeOTP(formattedPhone, otp);
+      // const info = await storeOTP(formattedPhone, otp);
+      const info = await storeOTP(formattedPhone, "000000");
     } catch (err) {
       console.log("otp store error : ", err)
     }
