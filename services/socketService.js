@@ -20,19 +20,66 @@ class SocketService {
     this.setupEventHandlers();
   }
 
+  // async setupRedisAdapter() {
+  //   try {
+  //     const redisHost = process.env.REDIS_HOST || "redis";
+  //     const redisPort = process.env.REDIS_PORT || 6379;
+  //     const redisPassword = process.env.REDIS_PASSWORD || "root";
+
+  //     const redisUrl = `redis://:${redisPassword}@${redisHost}:${redisPort}`;
+  //     console.log("🔗 Connecting Redis Adapter with URL:", redisUrl);
+
+  //     // ✅ Pub/Sub clients using full URL (auth included)
+  //     const pubClient = createClient({ url: redisUrl, password: redisPassword });
+  //     const subClient = pubClient.duplicate();
+
+  //     pubClient.on("error", (err) =>
+  //       console.error("❌ Redis PubClient Error:", err)
+  //     );
+  //     subClient.on("error", (err) =>
+  //       console.error("❌ Redis SubClient Error:", err)
+  //     );
+
+  //     await pubClient.connect();
+  //     await subClient.connect();
+
+  //     console.log("🔐 Redis adapter connected and authenticated successfully");
+
+  //     this.io.adapter(createAdapter(pubClient, subClient));
+  //   } catch (err) {
+  //     console.error("❌ Failed to initialize Redis adapter:", err);
+  //   }
+  // }
+
+
   async setupRedisAdapter() {
     try {
-      const redisHost = process.env.REDIS_HOST || "redis";
-      const redisPort = process.env.REDIS_PORT || 6379;
-      const redisPassword = process.env.REDIS_PASSWORD || "root";
+      // ✅ Prefer REDIS_URL (Render-managed Redis or external)
+      const redisUrl = process.env.REDIS_URL;
 
-      const redisUrl = `redis://:${redisPassword}@${redisHost}:${redisPort}`;
-      console.log("🔗 Connecting Redis Adapter with URL:", redisUrl);
+      let pubClient, subClient;
 
-      // ✅ Pub/Sub clients using full URL (auth included)
-      const pubClient = createClient({ url: redisUrl, password: redisPassword });
-      const subClient = pubClient.duplicate();
+      if (redisUrl) {
+        console.log("🌐 Connecting to external Redis (Render)...");
+        pubClient = createClient({ url: redisUrl });
+        subClient = pubClient.duplicate();
+      } else {
+        // ✅ Fallback for local Docker Compose
+        const redisHost = process.env.REDIS_HOST || "redis";
+        const redisPort = process.env.REDIS_PORT || 6379;
+        const redisPassword = process.env.REDIS_PASSWORD || "root";
+        const localUrl = `redis://:${redisPassword}@${redisHost}:${redisPort}`;
 
+        console.log("🧱 Connecting to local Redis:", localUrl);
+        pubClient = createClient({
+          url: localUrl,
+          socket: { host: redisHost, port: redisPort },
+          password: redisPassword,
+        });
+        subClient = pubClient.duplicate();
+      }
+
+      // ✅ Handle TLS (Render Redis often requires SSL)
       pubClient.on("error", (err) =>
         console.error("❌ Redis PubClient Error:", err)
       );
@@ -43,13 +90,16 @@ class SocketService {
       await pubClient.connect();
       await subClient.connect();
 
-      console.log("🔐 Redis adapter connected and authenticated successfully");
+      console.log("🔐 Redis adapter connected successfully");
 
+      // ✅ Attach adapter to Socket.IO
       this.io.adapter(createAdapter(pubClient, subClient));
     } catch (err) {
       console.error("❌ Failed to initialize Redis adapter:", err);
     }
   }
+
+
 
   setupMiddleware() {
     this.io.use(async (socket, next) => {
