@@ -1,7 +1,4 @@
 export const errorHandler = (err, req, res, next) => {
-  console.error('Error:', err);
-
-  // Prisma errors
   if (err.code === 'P2002') {
     return res.status(409).json({
       error: 'Duplicate entry',
@@ -23,7 +20,6 @@ export const errorHandler = (err, req, res, next) => {
     });
   }
 
-  // JWT errors
   if (err.name === 'JsonWebTokenError') {
     return res.status(401).json({
       error: 'Invalid token',
@@ -61,7 +57,6 @@ export const errorHandler = (err, req, res, next) => {
     });
   }
 
-  // Rate limiting errors
   if (err.status === 429) {
     return res.status(429).json({
       error: 'Too many requests',
@@ -69,7 +64,6 @@ export const errorHandler = (err, req, res, next) => {
     });
   }
 
-  // Default error
   const statusCode = err.statusCode || err.status || 500;
   const message = err.message || 'Internal server error';
 

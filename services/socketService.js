@@ -10,8 +10,10 @@ class SocketService {
   constructor(server) {
     this.io = new Server(server, {
       cors: {
-        origin: process.env.CLIENT_URL ? [process.env.CLIENT_URL, "http://localhost:8080"] : "*",
-        credentials: true
+        origin: process.env.CLIENT_URL
+          ? [process.env.CLIENT_URL, "http://localhost:8080"]
+          : "*",
+        credentials: true,
       },
     });
 
@@ -20,87 +22,73 @@ class SocketService {
     this.setupEventHandlers();
   }
 
-  // async setupRedisAdapter() {
-  //   try {
-  //     const redisHost = process.env.REDIS_HOST || "redis";
-  //     const redisPort = process.env.REDIS_PORT || 6379;
-  //     const redisPassword = process.env.REDIS_PASSWORD || "root";
-
-  //     const redisUrl = `redis://:${redisPassword}@${redisHost}:${redisPort}`;
-  //     console.log("🔗 Connecting Redis Adapter with URL:", redisUrl);
-
-  //     // ✅ Pub/Sub clients using full URL (auth included)
-  //     const pubClient = createClient({ url: redisUrl, password: redisPassword });
-  //     const subClient = pubClient.duplicate();
-
-  //     pubClient.on("error", (err) =>
-  //       console.error("❌ Redis PubClient Error:", err)
-  //     );
-  //     subClient.on("error", (err) =>
-  //       console.error("❌ Redis SubClient Error:", err)
-  //     );
-
-  //     await pubClient.connect();
-  //     await subClient.connect();
-
-  //     console.log("🔐 Redis adapter connected and authenticated successfully");
-
-  //     this.io.adapter(createAdapter(pubClient, subClient));
-  //   } catch (err) {
-  //     console.error("❌ Failed to initialize Redis adapter:", err);
-  //   }
-  // }
-
-
+  //Stable Redis Adapter (Render + Local support)
   async setupRedisAdapter() {
     try {
-      // ✅ Prefer REDIS_URL (Render-managed Redis or external)
       const redisUrl = process.env.REDIS_URL;
-
       let pubClient, subClient;
 
       if (redisUrl) {
         console.log("🌐 Connecting to external Redis (Render)...");
-        pubClient = createClient({ url: redisUrl });
+
+        const redisOptions = {
+          url: redisUrl,
+          socket: {
+            tls: true,
+            reconnectStrategy: (retries) => Math.min(retries * 50, 2000),
+          },
+        };
+
+        pubClient = createClient(redisOptions);
         subClient = pubClient.duplicate();
       } else {
-        // ✅ Fallback for local Docker Compose
         const redisHost = process.env.REDIS_HOST || "redis";
         const redisPort = process.env.REDIS_PORT || 6379;
         const redisPassword = process.env.REDIS_PASSWORD || "root";
         const localUrl = `redis://:${redisPassword}@${redisHost}:${redisPort}`;
 
         console.log("🧱 Connecting to local Redis:", localUrl);
+
         pubClient = createClient({
           url: localUrl,
-          socket: { host: redisHost, port: redisPort },
+          socket: {
+            host: redisHost,
+            port: redisPort,
+            tls: true,
+            reconnectStrategy: (retries) => Math.min(retries * 50, 2000),
+          },
           password: redisPassword,
         });
         subClient = pubClient.duplicate();
       }
 
-      // ✅ Handle TLS (Render Redis often requires SSL)
-      pubClient.on("error", (err) =>
-        console.error("❌ Redis PubClient Error:", err)
-      );
-      subClient.on("error", (err) =>
-        console.error("❌ Redis SubClient Error:", err)
-      );
+      // ✅ Event listeners
+      const attachRedisEvents = (client, label) => {
+        client.on("connect", () => console.log(`✅ ${label} connected to Redis`));
+        client.on("ready", () => console.log(`🚀 ${label} ready to use`));
+        client.on("end", () => console.log(`🧹 ${label} connection closed`));
+        client.on("reconnecting", () =>
+          console.log(`🔄 ${label} reconnecting to Redis...`)
+        );
+        client.on("error", (err) =>
+          console.error(`❌ ${label} Redis Error:`, err)
+        );
+      };
+
+      attachRedisEvents(pubClient, "PubClient");
+      attachRedisEvents(subClient, "SubClient");
 
       await pubClient.connect();
       await subClient.connect();
 
       console.log("🔐 Redis adapter connected successfully");
-
-      // ✅ Attach adapter to Socket.IO
       this.io.adapter(createAdapter(pubClient, subClient));
     } catch (err) {
       console.error("❌ Failed to initialize Redis adapter:", err);
     }
   }
 
-
-
+  // ✅ JWT Authentication Middleware
   setupMiddleware() {
     this.io.use(async (socket, next) => {
       try {
@@ -134,6 +122,7 @@ class SocketService {
     });
   }
 
+  // ✅ Socket Event Handlers
   setupEventHandlers() {
     this.io.on("connection", (socket) => {
       console.log(
@@ -142,6 +131,7 @@ class SocketService {
 
       socket.join(`user_${socket.userId}`);
 
+      // Join job rooms
       socket.on("join_job_room", (jobId) => {
         socket.join(`job_${jobId}`);
         console.log(`📦 User ${socket.userId} joined job room ${jobId}`);
@@ -158,7 +148,7 @@ class SocketService {
         console.log(`🚪 User ${socket.userId} left job room ${jobId}`);
       });
 
-      // 🌍 Location tracking
+      // 📍 Location Tracking
       socket.on("location_update", async (data) => {
         try {
           const { jobId, latitude, longitude, accuracy } = data;
@@ -283,8 +273,8 @@ class SocketService {
         }
       });
 
-      socket.on("typing_start", (data) => {
-        const { jobId } = data;
+      // ✍️ Typing indicators
+      socket.on("typing_start", ({ jobId }) => {
         socket.to(`job_${jobId}`).emit("user_typing", {
           userId: socket.userId,
           userName: `${socket.user.firstName} ${socket.user.lastName}`,
@@ -292,8 +282,7 @@ class SocketService {
         });
       });
 
-      socket.on("typing_stop", (data) => {
-        const { jobId } = data;
+      socket.on("typing_stop", ({ jobId }) => {
         socket.to(`job_${jobId}`).emit("user_typing", {
           userId: socket.userId,
           userName: `${socket.user.firstName} ${socket.user.lastName}`,
@@ -309,6 +298,7 @@ class SocketService {
     });
   }
 
+  // ✅ Notification helpers
   async sendNotificationToUser(userId, type, title, message, data = null) {
     try {
       const notification = await createNotification(
@@ -362,6 +352,7 @@ class SocketService {
     }
   }
 
+  // ✅ Utility helpers
   async broadcastJobUpdate(jobId, updateType, data) {
     try {
       this.io.to(`job_${jobId}`).emit("job_update", {

@@ -58,13 +58,10 @@ app.use("/", (req, resp) => {
   return resp.json({ message: "working properly" }).status(200)
 })
 
-// 404 handler
 app.use(notFound);
 
-// Error handler
 app.use(errorHandler);
 
-// Make socket service available globally
 app.set('socketService', socketService);
 
 const port = process.env.PORT || 3000;
@@ -75,7 +72,6 @@ server.listen(port, "0.0.0.0", () => {
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM received. Shutting down gracefully...');
   server.close(() => {
