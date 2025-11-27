@@ -1,4 +1,4 @@
-
+import { jobExpirationQueue } from '../../config/queue.js';
 import prisma from '../../config/database.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 import handleResponse from '../../utils/handleResponse.js';
@@ -21,6 +21,8 @@ class ImmediateJobController {
       budget,
     } = req.body;
 
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+
     const job = await prisma.job.create({
       data: {
         userId,
@@ -38,6 +40,7 @@ class ImmediateJobController {
         requiredSkills,
         budget,
         isLocationTracking: true,
+        expiresAt,
       },
       include: {
         user: {
@@ -50,6 +53,9 @@ class ImmediateJobController {
         },
       },
     });
+
+    // Add job to expiration queue
+    await jobExpirationQueue.add('expire-job', { jobId: job.id }, { delay: 300000 }); // 5 minutes
 
     // Notify nearby contractors
     try {
@@ -100,7 +106,6 @@ class ImmediateJobController {
         }
       }
     } catch (e) {
-      console.error('Failed to notify nearby contractors:', e);
     }
 
     return handleResponse(201, 'Immediate job created successfully!', { job }, res);

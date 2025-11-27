@@ -1,6 +1,7 @@
 import prisma from '../../config/database.js';
 import { generatePaginationMeta } from '../../utils/helpers.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
+import logger from '../../utils/logger.js';
 
 class NotificationController {
   // Get user's notifications
@@ -238,6 +239,62 @@ class NotificationController {
       notificationsByType,
       dailyStats
     });
+  });
+
+  // Subscribe to push notifications
+  static subscribeToPush = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const { subscription, fcmToken } = req.body;
+
+    if (!subscription && !fcmToken) {
+      return res.status(400).json({
+        error: 'Invalid request',
+        message: 'Either subscription object or fcmToken must be provided'
+      });
+    }
+
+    try {
+      // If FCM token is provided, store it on user
+      if (fcmToken) {
+        await prisma.user.update({
+          where: { id: userId },
+          data: { fcmToken }
+        });
+        logger.info('FCM token stored for user', { userId });
+      }
+
+      // If subscription object is provided (Web Push API), store push subscription
+      if (subscription && subscription.endpoint) {
+        const pushSub = await prisma.pushSubscription.upsert({
+          where: { endpoint: subscription.endpoint },
+          update: {
+            auth: subscription.keys?.auth,
+            p256dh: subscription.keys?.p256dh
+          },
+          create: {
+            userId,
+            endpoint: subscription.endpoint,
+            auth: subscription.keys?.auth || '',
+            p256dh: subscription.keys?.p256dh || ''
+          }
+        });
+        logger.info('Push subscription stored for user', { userId, endpoint: subscription.endpoint });
+      }
+
+      res.json({
+        message: 'Push subscription successful',
+        success: true
+      });
+    } catch (error) {
+      logger.error('Error subscribing to push notifications', {
+        error: error.message,
+        userId
+      });
+      res.status(500).json({
+        error: 'Subscription failed',
+        message: 'Failed to subscribe to push notifications'
+      });
+    }
   });
 }
 

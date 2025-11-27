@@ -7,7 +7,7 @@ import {
   validateUserLogin,
   validateOTP,
 } from '../middleware/validation.js';
-import { authLimiter, otpLimiter } from '../middleware/rateLimiter.js';
+import { authLimiter, otpLimiter, paymentOrderLimiter, paymentVerificationLimiter, quoteLimiter } from '../middleware/rateLimiter.js';
 import NotificationController from '../controllers/user/NotificationController.js';
 import PaymentController from '../controllers/user/PaymentController.js';
 import WorkerController from '../controllers/worker/WorkerController.js';
@@ -18,6 +18,7 @@ import LocationController from '../controllers/LocationController.js';
 import { authenticateToken, verifyWorkerToken } from '../middleware/auth.js';
 import ImmediateJobController from '../controllers/user/ImmediateJobController.js';
 import ScheduledJobController from '../controllers/user/ScheduledJobController.js';
+import { uploadMultiple } from '../middleware/upload.js';
 import BiddingJobController from '../controllers/user/BiddingJobController.js';
 
 const router = express.Router();
@@ -54,7 +55,12 @@ router.post('/logout', UserController.logout);
 router.get('/jobs', validatePagination, JobController.getUserJobs);
 router.post('/jobs/immediate', validateJobCreation, ImmediateJobController.createJob);
 router.post('/jobs/scheduled', validateJobCreation, ScheduledJobController.createJob);
-router.post('/jobs/bidding', validateJobCreation, BiddingJobController.createJob);
+router.post(
+  '/jobs/bidding',
+  uploadMultiple('jobImages', 5),
+  validateJobCreation,
+  BiddingJobController.createJob
+);
 router.get('/jobs/:jobId', JobController.getJobDetails);
 router.put('/jobs/:jobId', JobController.updateJob);
 router.post('/jobs/:jobId/cancel', JobController.cancelJob);
@@ -82,8 +88,8 @@ router.post('/worker/start-travel', WorkerController.startTravel);
 router.post('/worker/update-location', WorkerController.updateLocation);
 
 // Payment routes
-router.post('/payments/create-order', validatePayment, PaymentController.createOrder);
-router.post('/payments/verify', PaymentController.verifyPayment);
+router.post('/payments/create-order', paymentOrderLimiter, validatePayment, PaymentController.createOrder);
+router.post('/payments/verify', paymentVerificationLimiter, PaymentController.verifyPayment);
 router.get('/payments/history', validatePagination, PaymentController.getPaymentHistory);
 router.get('/payments/:paymentId', PaymentController.getPaymentDetails);
 router.post('/payments/:paymentId/refund', PaymentController.initiateRefund);
@@ -91,7 +97,6 @@ router.get('/payments/analytics', PaymentController.getPaymentAnalytics);
 router.get('/payments/methods', PaymentController.getPaymentMethods);
 router.post('/payments/methods', PaymentController.addPaymentMethod);
 router.delete('/payments/methods/:methodId', PaymentController.removePaymentMethod);
-
 // Notification routes
 router.get('/notifications', validatePagination, NotificationController.getNotifications);
 router.get('/notifications/unread-count', NotificationController.getUnreadCount);
@@ -100,6 +105,7 @@ router.put('/notifications/mark-all-read', NotificationController.markAllAsRead)
 router.delete('/notifications/:notificationId', NotificationController.deleteNotification);
 router.get('/notifications/preferences', NotificationController.getNotificationPreferences);
 router.put('/notifications/preferences', NotificationController.updateNotificationPreferences);
+router.post('/notifications/subscribe', NotificationController.subscribeToPush);
 router.get('/notifications/analytics', NotificationController.getNotificationAnalytics);
 
 export default router;

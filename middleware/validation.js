@@ -5,7 +5,7 @@ export const handleValidationErrors = (req, res, next) => {
   if (!errors.isEmpty()) {
     return res.status(400).json({
       error: 'Validation failed',
-      details: errors.array()
+      details: errors.array()[0]
     });
   }
   next();
@@ -62,8 +62,11 @@ export const validateWorker = [
 // Job validation rules
 export const validateJobCreation = [
   body('title').trim().isLength({ min: 5, max: 100 }).withMessage('Title must be 5-100 characters'),
-  body('description').trim().isLength({ min: 10, max: 1000 }).withMessage('Description must be 10-1000 characters'),
-  body('jobType').isIn(['IMMEDIATE', 'SCHEDULED', 'BIDDING']).withMessage('Invalid job type'),
+  body("jobType").isIn(["IMMEDIATE", "SCHEDULED", "BIDDING"]).withMessage("Invalid job type"),
+  body("description").if(body("jobType").equals("BIDDING")).trim().isLength({ min: 10, max: 1000 }).withMessage("Description must be 10–1000 characters").optional({ nullable: true }),
+  body("requiredSkills").if(body("jobType").equals("BIDDING")).isArray({ min: 1 }).withMessage("At least one skill is required").optional({ nullable: true }),
+  body("description").if(body("jobType").not().equals("BIDDING")).optional(),
+  body("requiredSkills").if(body("jobType").not().equals("BIDDING")).optional(),
   body('address').trim().isLength({ min: 10, max: 200 }).withMessage('Address must be 10-200 characters'),
   body('city').trim().isLength({ min: 2, max: 50 }).withMessage('City must be 2-50 characters'),
   body('state').trim().isLength({ min: 2, max: 50 }).withMessage('State must be 2-50 characters'),
@@ -74,16 +77,26 @@ export const validateJobCreation = [
   body('scheduledTime').optional().isString().withMessage('Valid time required'),
   body('estimatedDuration').optional().isInt({ min: 1, max: 24 }).withMessage('Duration must be 1-24 hours'),
   body('numberOfWorkers').isInt({ min: 1, max: 20 }).withMessage('Number of workers must be 1-20'),
-  body('requiredSkills').isArray({ min: 1 }).withMessage('At least one skill is required'),
   body('budget').optional().isFloat({ min: 0 }).withMessage('Budget must be positive'),
   handleValidationErrors
 ];
 
 // Quote validation rules
 export const validateQuote = [
-  body('amount').isFloat({ min: 0 }).withMessage('Amount must be positive'),
+  body('amount').isFloat({ min: 1 }).withMessage('Amount must be positive'),
+  body('totalAmount').optional().isFloat({ min: 1 }).withMessage('Total amount must be positive if provided'),
   body('estimatedArrival').optional().isString().withMessage('Valid ETA required'),
   body('notes').optional().isString().withMessage('Notes must be string'),
+  handleValidationErrors
+];
+
+// Quote submission with add-ons and documents
+export const validateQuoteSubmission = [
+  body('amount').isFloat({ min: 1 }).withMessage('Amount must be positive'),
+  body('totalAmount').optional().isFloat({ min: 1 }).withMessage('Total amount must be positive'),
+  body('estimatedArrival').optional().isString().withMessage('Estimated arrival must be a string'),
+  body('notes').optional().isString().isLength({ max: 1000 }).withMessage('Notes cannot exceed 1000 characters'),
+  body('meetingScheduledOn').optional().isISO8601().withMessage('Meeting date must be valid ISO date'),
   handleValidationErrors
 ];
 
@@ -107,8 +120,21 @@ export const validateReview = [
 
 // Payment validation rules
 export const validatePayment = [
-  body('amount').isFloat({ min: 0 }).withMessage('Amount must be positive'),
-  body('paymentType').isIn(['advance', 'final', 'refund']).withMessage('Invalid payment type'),
+  body('jobId').notEmpty().withMessage('Job ID is required'),
+  body('amount').isFloat({ min: 1 }).withMessage('Amount must be greater than 0'),
+  body('paymentType').isIn(['advance', 'final', 'refund', 'ADVANCE', 'FINAL', 'REFUND']).withMessage('Invalid payment type'),
+  handleValidationErrors
+];
+
+// Advance payment validation - ensure amount <= 20% of quote
+export const validateAdvancePayment = [
+  body('jobId').notEmpty().withMessage('Job ID is required'),
+  body('amount').isFloat({ min: 1 }).withMessage('Amount must be positive'),
+  // Specific check: amount should not exceed 20% of the agreed quote
+  body('amount').custom((value, { req }) => {
+    // This will be validated in the controller
+    return true;
+  }),
   handleValidationErrors
 ];
 

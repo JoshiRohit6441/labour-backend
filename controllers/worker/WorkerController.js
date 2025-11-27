@@ -49,7 +49,7 @@ class WorkerController {
         );
       }
     } catch (e) {
-      console.error('Failed to notify user about worker travel:', e);
+      // Silently handle notification errors
     }
 
     return handleResponse(200, 'Travel started successfully', { job: updatedJob }, res);
@@ -84,8 +84,8 @@ class WorkerController {
           longitude,
         });
       }
-    } catch (e) {
-      console.error('Failed to broadcast location update:', e);
+    } catch (error) {
+      // Silently handle broadcast errors
     }
 
     return handleResponse(200, 'Location updated successfully', { locationUpdate }, res);

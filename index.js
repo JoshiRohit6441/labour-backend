@@ -4,43 +4,59 @@ import helmet from 'helmet';
 import dotenv from 'dotenv';
 import { createServer } from 'http';
 
-// Import routes
 import userRoutes from './routes/UserRoutes.js';
 import contractorRoutes from './routes/ContractorRoutes.js';
 import adminRoutes from './routes/AdminRoutes.js';
 
-// Import middleware
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 import { generalLimiter } from './middleware/rateLimiter.js';
 
-// Import services
 import SocketService from './services/socketService.js';
 import './services/notificationWorker.js';
+import createJobExpirationWorker from './services/jobExpirationWorker.js';
+import createJobAcceptanceWorker from './services/jobAcceptanceWorker.js';
+import createNotificationWorker from './services/notificationWorker.js';
+import prisma from './config/database.js';
+
+import { initializeServices } from './services/index.js';
+import { redisReady } from './config/redisConfig.js';
 
 dotenv.config();
+
+await redisReady;
 
 const app = express();
 const server = createServer(app);
 
-// Initialize Socket.io
-const socketService = new SocketService(server);
 
-// Security middleware
+const socketService = new SocketService(server);
+app.set('socketService', socketService);
+
+initializeServices(app).catch(err => {
+  console.error('[Server] Failed to initialize services:', err);
+});
+
 app.use(helmet());
 app.use(cors({
-  origin: "*",
-  // origin: process.env.CLIENT_URL || "http://localhost:3000",
-  // credentials: true
+  origin: (origin, callback) => {
+    const allowed = [
+      "http://localhost:5173",
+      "http://localhost:8080",
+      "http://localhost:3000",
+      "https://labour-frontend-gamma.vercel.app"
+    ];
+    if (!origin) return callback(null, true);
+    if (allowed.includes(origin)) return callback(null, true);
+    return callback(new Error("Not allowed by CORS"));
+  },
+  credentials: true
 }));
 
-// Rate limiting
 app.use(generalLimiter);
 
-// Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
     status: 'OK',
@@ -49,7 +65,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// API routes
 app.use('/api/user', userRoutes);
 app.use('/api/contractor', contractorRoutes);
 app.use('/api/admin', adminRoutes);
@@ -62,26 +77,59 @@ app.use(notFound);
 
 app.use(errorHandler);
 
-app.set('socketService', socketService);
-
 const port = process.env.PORT || 3000;
 
-server.listen(port, "0.0.0.0", () => {
-  console.log(`🚀 Server is running on port ${port}`);
-  console.log(`📱 Socket.io server is running`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-});
+const testDBConnection = async () => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    console.log('[Database] Connection successful');
+    return true;
+  } catch (error) {
+    console.error('[Database] Connection failed:', error.message);
+    return false;
+  }
+};
 
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received. Shutting down gracefully...');
+const startServer = async (retryCount = 0) => {
+  const maxRetries = 5;
+  
+  if (!(await testDBConnection())) {
+    if (retryCount < maxRetries) {
+      console.log(`[Server] Retrying connection in 5 seconds... (${retryCount + 1}/${maxRetries})`);
+      setTimeout(() => startServer(retryCount + 1), 5000);
+      return;
+    } else {
+      console.error('[Server] Failed to connect to database after maximum retries');
+      process.exit(1);
+    }
+  }
+
+  console.log('[Server] Database ready, initializing workers');
+  createJobExpirationWorker(app);
+  createJobAcceptanceWorker(app);
+  createNotificationWorker(app);
+
+  server.listen(port, "0.0.0.0", () => {
+    console.log(`[Server] Running on port ${port}`);
+  });
+};
+
+startServer();
+
+process.on('SIGTERM', async () => {
+  console.log('[Server] SIGTERM received, shutting down gracefully');
+  await prisma.$disconnect();
   server.close(() => {
-    console.log('Process terminated');
+    console.log('[Server] Server closed');
+    process.exit(0);
   });
 });
 
-process.on('SIGINT', () => {
-  console.log('SIGINT received. Shutting down gracefully...');
+process.on('SIGINT', async () => {
+  console.log('[Server] SIGINT received, shutting down gracefully');
+  await prisma.$disconnect();
   server.close(() => {
-    console.log('Process terminated');
+    console.log('[Server] Server closed');
+    process.exit(0);
   });
 });

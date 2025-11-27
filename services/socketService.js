@@ -5,376 +5,212 @@ import jwt from "jsonwebtoken";
 import { JWT_SECRET } from "../config/jwtConfig.js";
 import { createNotification } from "../controllers/notification/NotificationController.js";
 import prisma from "../config/database.js";
+import pushService from "./pushService.js";
+
+let socketServiceInstance = null;
 
 class SocketService {
   constructor(server) {
+    if (socketServiceInstance) {
+      return socketServiceInstance;
+    }
+
+    const allowedOrigins = new Set([
+      "http://localhost:5173",
+      "http://localhost:8080",
+      "http://localhost:3000",
+      "https://labour-frontend-gamma.vercel.app"
+    ]);
+
     this.io = new Server(server, {
       cors: {
-        origin:"*"
-        // origin: process.env.CLIENT_URL
-        //   ? [process.env.CLIENT_URL, "http://localhost:8080"]
-        //   : "*",
-        // credentials: true,
+        origin: (origin, callback) => {
+          if (!origin) return callback(null, true);
+          if (allowedOrigins.has(origin)) {
+            return callback(null, true);
+          }
+          return callback(new Error("Origin not allowed by CORS: " + origin));
+        },
+        methods: ["GET", "POST"],
+        credentials: true,
       },
+
+      handlePreflightRequest: (req, res) => {
+        const origin = req.headers.origin;
+
+        if (origin && allowedOrigins.has(origin)) {
+          res.setHeader("Access-Control-Allow-Origin", origin);
+          res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+          res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+          res.setHeader("Access-Control-Allow-Credentials", "true");
+        }
+
+        res.writeHead(204);
+        res.end();
+      }
     });
 
     this.setupRedisAdapter();
     this.setupMiddleware();
     this.setupEventHandlers();
+
+    socketServiceInstance = this;
   }
 
-  //Stable Redis Adapter (Render + Local support)
-  async setupRedisAdapter() {
-    try {
-      const redisUrl = process.env.REDIS_URL;
-      let pubClient, subClient;
+  setupRedisAdapter() {
+    const redisOpts = {
+      url: process.env.REDIS_URL,
+    };
 
-      if (redisUrl) {
-        console.log("🌐 Connecting to external Redis (Render)...");
+    if (process.env.REDIS_URL.startsWith("rediss://")) {
+      redisOpts.socket = {
+        tls: true,
+        rejectUnauthorized: false,
+      };
+    }
 
-        const redisOptions = {
-          url: redisUrl,
-          socket: {
-            tls: true,
-            reconnectStrategy: (retries) => Math.min(retries * 50, 2000),
-          },
-        };
+    const pubClient = createClient(redisOpts);
+    const subClient = pubClient.duplicate();
 
-        pubClient = createClient(redisOptions);
-        subClient = pubClient.duplicate();
-      } else {
-        const redisHost = process.env.REDIS_HOST || "redis";
-        const redisPort = process.env.REDIS_PORT || 6379;
-        const redisPassword = process.env.REDIS_PASSWORD || "root";
-        const localUrl = `redis://:${redisPassword}@${redisHost}:${redisPort}`;
+    pubClient.on("error", (err) =>
+      console.error("[Redis PubClient Error]", err?.message || err)
+    );
 
-        console.log("🧱 Connecting to local Redis:", localUrl);
+    subClient.on("error", (err) =>
+      console.error("[Redis SubClient Error]", err?.message || err)
+    );
 
-        pubClient = createClient({
-          url: localUrl,
-          socket: {
-            host: redisHost,
-            port: redisPort,
-            tls: true,
-            reconnectStrategy: (retries) => Math.min(retries * 50, 2000),
-          },
-          password: redisPassword,
-        });
-        subClient = pubClient.duplicate();
+    pubClient.connect().catch((err) =>
+      console.error("[Redis PubClient Connect Failed]", err)
+    );
+
+    subClient.connect().catch((err) =>
+      console.error("[Redis SubClient Connect Failed]", err)
+    );
+
+    this.io.adapter(createAdapter(pubClient, subClient));
+  }
+
+  setupMiddleware() {
+    this.io.use((socket, next) => {
+      const token =
+        socket.handshake.auth?.token ||
+        socket.handshake.headers?.authorization?.split(" ")[1];
+
+      if (!token) {
+        return next(new Error("Authentication error"));
       }
 
-      // ✅ Event listeners
-      const attachRedisEvents = (client, label) => {
-        client.on("connect", () => console.log(`✅ ${label} connected to Redis`));
-        client.on("ready", () => console.log(`🚀 ${label} ready to use`));
-        client.on("end", () => console.log(`🧹 ${label} connection closed`));
-        client.on("reconnecting", () =>
-          console.log(`🔄 ${label} reconnecting to Redis...`)
-        );
-        client.on("error", (err) =>
-          console.error(`❌ ${label} Redis Error:`, err)
-        );
-      };
-
-      attachRedisEvents(pubClient, "PubClient");
-      attachRedisEvents(subClient, "SubClient");
-
-      await pubClient.connect();
-      await subClient.connect();
-
-      console.log("🔐 Redis adapter connected successfully");
-      this.io.adapter(createAdapter(pubClient, subClient));
-    } catch (err) {
-      console.error("❌ Failed to initialize Redis adapter:", err);
-    }
+      jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) {
+          return next(new Error("Authentication error"));
+        }
+        socket.user = user;
+        next();
+      });
+    });
   }
 
-  // ✅ JWT Authentication Middleware
-  setupMiddleware() {
-    this.io.use(async (socket, next) => {
-      try {
-        const token = socket.handshake.auth.token;
-        if (!token) return next(new Error("Authentication error: Missing token"));
+  setupEventHandlers() {
+    this.io.on("connection", (socket) => {
 
-        const decoded = jwt.verify(token, JWT_SECRET);
+      socket.on("join_room", (roomId) => socket.join(roomId));
+      socket.on("leave_room", (roomId) => socket.leave(roomId));
 
-        const user = await prisma.user.findUnique({
-          where: { id: decoded.userId },
+      socket.on("join_job_room", (jobId) => socket.join(`job_${jobId}`));
+      socket.on("leave_job_room", (jobId) => socket.leave(`job_${jobId}`));
+
+      socket.on("send_message", async ({ chatRoomId, message }) => {
+        const senderId = socket.user?.id;
+        if (!chatRoomId || !senderId) return;
+        await this.handleNewMessage(chatRoomId, senderId, message);
+      });
+
+      socket.on("disconnect", (reason) => {
+      });
+    });
+  }
+
+  async handleNewMessage(chatRoomId, senderId, message) {
+    const chatMessage = await prisma.chatMessage.create({
+      data: { chatRoomId, senderId, message },
+      include: {
+        sender: {
           select: {
             id: true,
             firstName: true,
             lastName: true,
-            role: true,
-            status: true,
+            profileImage: true,
           },
-        });
-
-        if (!user || user.status === "SUSPENDED") {
-          return next(new Error("User not found or suspended"));
-        }
-
-        socket.userId = user.id;
-        socket.user = user;
-        next();
-      } catch (error) {
-        console.error("🔑 Socket authentication failed:", error);
-        next(new Error("Authentication error"));
-      }
+        },
+      },
     });
+
+    this.io.to(chatRoomId).emit("new_message", chatMessage);
   }
 
-  // ✅ Socket Event Handlers
-  setupEventHandlers() {
-    this.io.on("connection", (socket) => {
-      console.log(
-        `✅ User ${socket.user.firstName} ${socket.user.lastName} connected`
-      );
-
-      socket.join(`user_${socket.userId}`);
-
-      // Join job rooms
-      socket.on("join_job_room", (jobId) => {
-        socket.join(`job_${jobId}`);
-        console.log(`📦 User ${socket.userId} joined job room ${jobId}`);
-      });
-
-      socket.on("join_chat_room", ({ jobId, userId, contractorId }) => {
-        const room = `chat_${jobId}_${userId}_${contractorId}`;
-        socket.join(room);
-        console.log(`💬 User ${socket.userId} joined chat room ${room}`);
-      });
-
-      socket.on("leave_job_room", (jobId) => {
-        socket.leave(`job_${jobId}`);
-        console.log(`🚪 User ${socket.userId} left job room ${jobId}`);
-      });
-
-      // 📍 Location Tracking
-      socket.on("location_update", async (data) => {
-        try {
-          const { jobId, latitude, longitude, accuracy } = data;
-
-          const job = await prisma.job.findFirst({
-            where: {
-              id: jobId,
-              OR: [
-                { userId: socket.userId },
-                { contractor: { userId: socket.userId } },
-              ],
-            },
-          });
-
-          if (!job) {
-            socket.emit("error", { message: "Access denied to this job" });
-            return;
-          }
-
-          if (job.jobType !== "IMMEDIATE") {
-            socket.emit("error", {
-              message: "Location tracking allowed only for IMMEDIATE jobs",
-            });
-            return;
-          }
-
-          if (!job.isLocationTracking) {
-            socket.emit("error", {
-              message: "Location tracking is disabled for this job",
-            });
-            return;
-          }
-
-          if (job.status !== "IN_PROGRESS") {
-            socket.emit("error", {
-              message: "Location updates allowed only when job is IN_PROGRESS",
-            });
-            return;
-          }
-
-          await prisma.locationUpdate.create({
-            data: {
-              userId: socket.userId,
-              jobId,
-              latitude: parseFloat(latitude),
-              longitude: parseFloat(longitude),
-              accuracy,
-            },
-          });
-
-          socket.to(`job_${jobId}`).emit("location_update", {
-            userId: socket.userId,
-            jobId,
-            latitude,
-            longitude,
-            accuracy,
-            timestamp: new Date(),
-          });
-        } catch (error) {
-          console.error("📍 Location update error:", error);
-          socket.emit("error", { message: "Failed to update location" });
-        }
-      });
-
-      // 💬 Chat messages
-      socket.on("send_message", async (data) => {
-        try {
-          const {
-            jobId,
-            userId,
-            contractorId,
-            message,
-            messageType = "text",
-            fileUrl,
-          } = data;
-
-          const job = await prisma.job.findFirst({
-            where: {
-              id: jobId,
-              OR: [
-                { userId: socket.userId },
-                { contractor: { userId: socket.userId } },
-              ],
-            },
-            include: { chatRoom: true },
-          });
-
-          if (!job || !job.chatRoom) {
-            socket.emit("error", { message: "Access denied to this job chat" });
-            return;
-          }
-
-          const chatMessage = await prisma.chatMessage.create({
-            data: {
-              chatRoomId: job.chatRoom.id,
-              senderId: socket.userId,
-              message,
-              messageType,
-              fileUrl,
-            },
-            include: {
-              sender: {
-                select: {
-                  id: true,
-                  firstName: true,
-                  lastName: true,
-                  role: true,
-                },
-              },
-            },
-          });
-
-          const room =
-            userId && contractorId
-              ? `chat_${jobId}_${userId}_${contractorId}`
-              : `job_${jobId}`;
-
-          this.io.to(room).emit("new_message", chatMessage);
-        } catch (error) {
-          console.error("💬 Chat message error:", error);
-          socket.emit("error", { message: "Failed to send message" });
-        }
-      });
-
-      // ✍️ Typing indicators
-      socket.on("typing_start", ({ jobId }) => {
-        socket.to(`job_${jobId}`).emit("user_typing", {
-          userId: socket.userId,
-          userName: `${socket.user.firstName} ${socket.user.lastName}`,
-          isTyping: true,
-        });
-      });
-
-      socket.on("typing_stop", ({ jobId }) => {
-        socket.to(`job_${jobId}`).emit("user_typing", {
-          userId: socket.userId,
-          userName: `${socket.user.firstName} ${socket.user.lastName}`,
-          isTyping: false,
-        });
-      });
-
-      socket.on("disconnect", () => {
-        console.log(
-          `❌ User ${socket.user.firstName} ${socket.user.lastName} disconnected`
-        );
-      });
+  async sendNotificationToUser(userId, type, title, message, data) {
+    const notification = await createNotification({
+      userId,
+      type,
+      title,
+      message,
+      data,
     });
-  }
 
-  // ✅ Notification helpers
-  async sendNotificationToUser(userId, type, title, message, data = null) {
+    this.io.to(`user_${userId}`).emit("new_notification", notification);
+
     try {
-      const notification = await createNotification(
-        userId,
-        type,
-        title,
-        message,
-        data
-      );
-
-      this.io.to(`user_${userId}`).emit("notification", {
-        id: notification.id,
-        type,
-        title,
-        message,
-        data,
-        sentAt: notification.sentAt,
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { fcmToken: true, pushTokens: true },
       });
 
-      if (type === "JOB_REQUEST" && data?.jobId) {
-        this.io.to(`user_${userId}`).emit("new_job_notification", {
-          jobId: data.jobId,
-          message: "A new job is available near you!",
-        });
+      const tokens = [];
+
+      if (user) {
+        if (Array.isArray(user.pushTokens)) tokens.push(...user.pushTokens);
+        if (user.fcmToken) tokens.push(user.fcmToken);
       }
 
-      return notification;
-    } catch (error) {
-      console.error("🔔 Failed to send notification:", error);
-      return null;
+      if (tokens.length > 0) {
+        await pushService.sendToTokens(tokens, {
+          title,
+          body: message,
+          data,
+        });
+      }
+    } catch (err) {
+      console.error("[Push Notification Error]", err?.message);
     }
   }
 
-  async sendNotificationToUsers(userIds, type, title, message, data = null) {
-    try {
-      const notifications = [];
-      for (const userId of userIds) {
-        const n = await this.sendNotificationToUser(
+  async sendNotificationToUsers(userIds, type, title, message, data) {
+    const notifications = await Promise.all(
+      userIds.map((userId) =>
+        createNotification({
           userId,
           type,
           title,
           message,
-          data
-        );
-        if (n) notifications.push(n);
-      }
-      return notifications;
-    } catch (error) {
-      console.error("🔔 Failed to send bulk notifications:", error);
-      return [];
-    }
-  }
+          data,
+        })
+      )
+    );
 
-  // ✅ Utility helpers
-  async broadcastJobUpdate(jobId, updateType, data) {
-    try {
-      this.io.to(`job_${jobId}`).emit("job_update", {
-        jobId,
-        updateType,
-        data,
-        timestamp: new Date(),
-      });
-    } catch (error) {
-      console.error("🚨 Failed to broadcast job update:", error);
-    }
-  }
-
-  getConnectedUsersCount() {
-    return this.io.engine.clientsCount;
-  }
-
-  getRoomUsersCount(roomName) {
-    const room = this.io.sockets.adapter.rooms.get(roomName);
-    return room ? room.size : 0;
+    notifications.forEach((notification) => {
+      this.io
+        .to(`user_${notification.userId}`)
+        .emit("new_notification", notification);
+    });
   }
 }
+
+export const getSocketService = () => {
+  if (!socketServiceInstance) {
+    throw new Error("SocketService not initialized");
+  }
+  return socketServiceInstance;
+};
 
 export default SocketService;

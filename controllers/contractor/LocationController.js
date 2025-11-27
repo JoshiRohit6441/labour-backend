@@ -44,11 +44,9 @@ class LocationController {
           { jobId, cta: 'TRACK_WORKER' }
         );
       }
-    } catch (e) {
-      console.error('Failed to notify user about worker travel:', e);
-    }
-
-    return handleResponse(200, 'Travel started successfully', { job: updatedJob }, res);
+      } catch (e) {
+        // Silently handle notification errors
+      }    return handleResponse(200, 'Travel started successfully', { job: updatedJob }, res);
   });
 
   static endTravel = asyncHandler(async (req, res) => {
@@ -151,8 +149,8 @@ class LocationController {
           longitude,
         });
       }
-    } catch (e) {
-      console.error('Failed to broadcast location update:', e);
+    } catch (error) {
+      // Silently handle broadcast errors
     }
 
     return handleResponse(200, 'Location updated successfully', { locationUpdate }, res);

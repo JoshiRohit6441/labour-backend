@@ -1,23 +1,44 @@
 import { Worker } from 'bullmq';
+import prisma from '../config/database.js';
+import webpush from '../config/webPushConfig.js';
+import 'dotenv/config';
 
-const redisHost = process.env.REDIS_HOST || '127.0.0.1';
-const redisPort = process.env.REDIS_PORT || 6379;
-const redisPassword = process.env.REDIS_PASSWORD || "root";
+const createNotificationWorker = (app) => {
+  const worker = new Worker(
+    'notification-queue',
+    async (job) => {
+      const { type, data } = job.data;
 
-const notificationWorker = new Worker('notification-queue', async (job) => {
-  const { type, data } = job.data;
+      if (type === 'push') {
+        const { userId, title, message, data: notificationData } = data;
 
-  if (type === 'sms') {
-    console.log(`Sending SMS to ${data.phone} with message: ${data.message}`);
-  }
-}, {
-  connection: {
-    host: redisHost,
-    port: redisPort,
-    password: redisPassword,
-  },
-});
+        const subscriptions = await prisma.pushSubscription.findMany({
+          where: { userId },
+        });
 
-console.log('Notification worker started');
+        const payload = JSON.stringify({
+          title,
+          message,
+          data: notificationData,
+        });
 
-export default notificationWorker;
+        await Promise.all(
+          subscriptions.map((subscription) =>
+            webpush.sendNotification(subscription, payload)
+          )
+        );
+      }
+    },
+    {
+      connection: {
+        // host: process.env.REDIS_HOST,
+        // port: process.env.REDIS_PORT,
+        url: process.env.REDIS_URL
+      },
+    }
+  );
+
+  return worker;
+};
+
+export default createNotificationWorker;

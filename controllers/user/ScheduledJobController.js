@@ -3,6 +3,7 @@ import prisma from '../../config/database.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 import handleResponse from '../../utils/handleResponse.js';
 import { calculateDistance } from '../../utils/helpers.js';
+import { scheduleNewJob } from '../../services/jobScheduler.js';
 
 class ScheduledJobController {
   static createJob = asyncHandler(async (req, res) => {
@@ -51,6 +52,9 @@ class ScheduledJobController {
         },
       },
     });
+
+    // Schedule the job
+    scheduleNewJob(job);
 
     // Notify nearby contractors
     try {
@@ -101,7 +105,7 @@ class ScheduledJobController {
         }
       }
     } catch (e) {
-      console.error('Failed to notify nearby contractors:', e);
+      // Silently handle notification errors
     }
 
     return handleResponse(201, 'Scheduled job created successfully!', { job }, res);

@@ -1,3 +1,4 @@
+import { jobAcceptanceQueue } from '../../config/queue.js';
 import prisma from '../../config/database.js';
 import { generatePaginationMeta, calculateDistance } from '../../utils/helpers.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
@@ -139,8 +140,7 @@ class JobController {
         }
       }
     } catch (e) {
-      // Non-blocking: log and continue
-      console.error('Failed to notify nearby contractors:', e);
+      // Non-blocking: silently handle notification errors
     }
 
     return handleResponse(201, 'Job created successfully!', { job }, res);
@@ -481,8 +481,9 @@ class JobController {
       where: { id: jobId },
       data: {
         status: 'CANCELLED',
-        cancellationReason: reason.trim()
-      }
+        cancellationReason: reason.trim(),
+        cancelledBy: 'USER',
+      },
     });
 
     // Notify contractor (if assigned)
@@ -503,7 +504,7 @@ class JobController {
         }
       }
     } catch (e) {
-      console.error('Failed to notify contractor about job cancellation:', e);
+      // Silently handle notification errors
     }
 
     return handleResponse(200, 'Job cancelled successfully', { job: updatedJob }, res);
@@ -541,19 +542,14 @@ class JobController {
       return handleResponse(404, 'Quote not found or does not belong to this job', null, res);
     }
 
-    const allQuotes = await prisma.quote.findMany({
-      where: { jobId },
-      include: { contractor: { select: { userId: true } } }
-    });
-
     const finalAmount = quote.totalAmount || quote.amount;
 
     const [_, jobUpdate] = await prisma.$transaction([
-      prisma.quote.update({ where: { id: quoteId }, data: { isAccepted: true, status: 'accepted' } }),
+      prisma.quote.update({ where: { id: quoteId }, data: { isAccepted: true, status: 'pending' } }),
       prisma.job.updateMany({
         where: { id: jobId, contractorId: null, status: { in: ['PENDING', 'QUOTED'] } },
         data: {
-          status: 'ACCEPTED',
+          status: 'OFFERED',
           contractorId: quote.contractorId,
           acceptedQuote: finalAmount,
           acceptedQuoteId: quoteId
@@ -565,6 +561,9 @@ class JobController {
       return handleResponse(409, 'This job has already been accepted by another contractor', null, res);
     }
 
+    // Add job to acceptance queue with a 5-minute delay
+    await jobAcceptanceQueue.add('check-acceptance', { jobId, quoteId }, { delay: 300000 });
+
     const updatedJob = await prisma.job.findUnique({
       where: { id: jobId },
       include: {
@@ -572,44 +571,23 @@ class JobController {
       }
     });
 
-    // Add contractor to chat room
-    await prisma.chatRoom.update({
-      where: { jobId },
-      data: {
-        participants: {
-          connect: { id: quote.contractor.userId }
-        }
-      }
-    });
-
+    // Notify contractor of the offer
     try {
       const socketService = req.app.get('socketService');
       if (socketService && socketService.sendNotificationToUser) {
         await socketService.sendNotificationToUser(
           quote.contractor.userId,
-          'JOB_ACCEPTED',
-          'Your quote was accepted',
-          `${updatedJob?.title || 'Job'} was awarded to you`,
-          { jobId, contractorId: quote.contractorId, cta: 'SEE_JOB' }
+          'JOB_OFFERED',
+          'You have a new job offer!',
+          `Your quote for "${updatedJob?.title || 'Job'}" was accepted. You have 5 minutes to accept.`,
+          { jobId, contractorId: quote.contractorId, cta: 'ACCEPT_OFFER' }
         );
-
-        for (const otherQuote of allQuotes) {
-          if (otherQuote.id !== quoteId && otherQuote.contractor.userId) {
-            await socketService.sendNotificationToUser(
-              otherQuote.contractor.userId,
-              'QUOTE_REJECTED',
-              'Your quote was not selected',
-              `Another contractor was selected for ${updatedJob?.title || 'the job'}`,
-              { jobId, quoteId: otherQuote.id }
-            );
-          }
-        }
       }
     } catch (e) {
-      console.error('Failed to notify contractors about quote acceptance:', e);
+      // Silently handle notification errors
     }
 
-    return handleResponse(200, 'Quote accepted successfully', { job: updatedJob }, res);
+    return handleResponse(200, 'Quote offered to contractor successfully', { job: updatedJob }, res);
   });
 
   // Submit review for job
@@ -846,7 +824,7 @@ class JobController {
         }
       }
     } catch (e) {
-      console.error('Failed to notify contractor about date change:', e);
+      // Silently handle notification errors
     }
 
     return handleResponse(200, 'Start date updated successfully.', { job: { id: updated.id, startDate: updated.startDate } }, res);

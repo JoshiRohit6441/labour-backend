@@ -3,6 +3,8 @@ import AdminController from '../controllers/admin/AdminController.js';
 import AdminPaymentController from '../controllers/admin/PaymentController.js';
 import AdminJobController from '../controllers/admin/JobController.js';
 import AdminNotificationController from '../controllers/admin/NotificationController.js';
+import CommissionController from '../controllers/admin/CommissionController.js';
+import AdminDocumentController from '../controllers/admin/DocumentController.js';
 import { authenticateToken, requireRole } from '../middleware/auth.js';
 import { validatePagination } from '../middleware/validation.js';
 
@@ -63,9 +65,29 @@ router.put('/notifications/:notificationId/read', AdminNotificationController.ma
 router.get('/notifications/templates', AdminNotificationController.getNotificationTemplates);
 router.get('/notifications/reports', AdminNotificationController.getNotificationReports);
 
+// Commission management routes
+router.get('/commissions', validatePagination, CommissionController.getCommissions);
+router.get('/commissions/stats', CommissionController.getCommissionStats);
+router.get('/commissions/:commissionId', CommissionController.getCommissionById);
+router.put('/commissions/:commissionId/approve', CommissionController.approveCommission);
+router.put('/commissions/:commissionId/reject', CommissionController.rejectCommission);
+
+// Document verification routes
+router.get('/documents', validatePagination, AdminDocumentController.getDocuments);
+router.get('/documents/stats', AdminDocumentController.getDocumentStats);
+router.get('/documents/:documentId', AdminDocumentController.getDocumentById);
+router.put('/documents/:documentId/verify', AdminDocumentController.verifyDocument);
+router.put('/documents/:documentId/reject', AdminDocumentController.rejectDocument);
+router.post('/documents/bulk-verify', AdminDocumentController.bulkVerifyDocuments);
+router.post('/documents/bulk-reject', AdminDocumentController.bulkRejectDocuments);
+
 // Verification routes
 router.get('/verifications', validatePagination, AdminController.getPendingVerifications);
 router.put('/verifications/:documentId', AdminController.verifyDocument);
+
+// Settings routes
+router.get('/settings/commission', AdminController.getCommissionRate);
+router.put('/settings/commission', AdminController.setCommissionRate);
 
 // Reports routes
 router.get('/reports', AdminController.getReports);

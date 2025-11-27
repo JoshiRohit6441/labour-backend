@@ -3,6 +3,7 @@ import prisma from '../../config/database.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 import handleResponse from '../../utils/handleResponse.js';
 import { calculateDistance } from '../../utils/helpers.js';
+import { uploadMultipleToCloudinary } from '../../utils/cloudinaryUploader.js';
 
 class BiddingJobController {
   static createJob = asyncHandler(async (req, res) => {
@@ -26,6 +27,17 @@ class BiddingJobController {
       budget,
     } = req.body;
 
+    let imageUrls = [];
+    if (req.files && req.files.length > 0) {
+      try {
+        const results = await uploadMultipleToCloudinary(req.files);
+        imageUrls = results.map((result) => result.secure_url);
+      } catch (error) {
+        // Silently handle upload errors
+        return handleResponse(500, 'Error uploading images.', null, res);
+      }
+    }
+
     const job = await prisma.job.create({
       data: {
         userId,
@@ -46,6 +58,7 @@ class BiddingJobController {
         quoteSubmissionDeadline: quoteSubmissionDeadline ? new Date(quoteSubmissionDeadline) : null,
         requiredSkills,
         budget,
+        images: imageUrls,
       },
       include: {
         user: {
@@ -108,7 +121,7 @@ class BiddingJobController {
         }
       }
     } catch (e) {
-      console.error('Failed to notify nearby contractors:', e);
+      // Silently handle notification errors
     }
 
     return handleResponse(201, 'Bidding job created successfully!', { job }, res);

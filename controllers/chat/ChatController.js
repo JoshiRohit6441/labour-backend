@@ -5,102 +5,78 @@ import handleResponse from '../../utils/handleResponse.js';
 
 class ChatController {
   static initiateChat = asyncHandler(async (req, res) => {
-    const { jobId, contractorId } = req.body;
+    const { jobId } = req.body;
     const userId = req.user.id;
 
-    const job = await prisma.job.findUnique({ where: { id: jobId } });
+    const job = await prisma.job.findUnique({
+      where: { id: jobId },
+      include: { contractor: true },
+    });
+
     if (!job) {
       return handleResponse(404, 'Job not found', null, res);
     }
 
-    if (job.userId !== userId) {
+    if (job.userId !== userId && job.contractor?.userId !== userId) {
       return handleResponse(403, 'You are not authorized to initiate a chat for this job', null, res);
     }
 
-    const contractor = await prisma.contractor.findUnique({ where: { id: contractorId } });
-    if (!contractor) {
-      return handleResponse(404, 'Contractor not found', null, res);
-    }
-
-    // Check if a chat already exists
-    const existingChat = await prisma.chatMessage.findFirst({
-      where: {
-        jobId,
-        OR: [
-          { senderId: userId, receiverId: contractor.userId },
-          { senderId: contractor.userId, receiverId: userId },
-        ],
-      },
+    let chatRoom = await prisma.chatRoom.findUnique({
+      where: { jobId },
     });
 
-    if (existingChat) {
-      return handleResponse(200, 'Chat already initiated', { chatId: existingChat.id }, res);
+    if (chatRoom) {
+      return handleResponse(200, 'Chat room already exists', { chatRoom }, res);
     }
 
-    const chatMessage = await prisma.chatMessage.create({
+    const contractorId = job.contractor?.userId;
+    if (!contractorId) {
+      return handleResponse(404, 'Contractor not found for this job', null, res);
+    }
+
+    chatRoom = await prisma.chatRoom.create({
       data: {
         jobId,
-        senderId: userId,
-        receiverId: contractor.userId,
-        message: `Chat initiated for job: ${job.title}`,
+        participants: {
+          connect: [{ id: userId }, { id: contractorId }],
+        },
       },
     });
 
-    return handleResponse(201, 'Chat initiated successfully', { chatMessage }, res);
+    return handleResponse(201, 'Chat room created successfully', { chatRoom }, res);
   });
 
   static sendMessage = asyncHandler(async (req, res) => {
-    const { jobId, receiverId, message } = req.body;
+    const { chatRoomId, message } = req.body;
     const senderId = req.user.id;
 
-    const job = await prisma.job.findUnique({ where: { id: jobId } });
-    if (!job) {
-      return handleResponse(404, 'Job not found', null, res);
-    }
-
-    const chatMessage = await prisma.chatMessage.create({
-      data: {
-        jobId,
-        senderId,
-        receiverId,
-        message,
-      },
-    });
-
-    // Notify the receiver
     const socketService = req.app.get('socketService');
-    if (socketService && socketService.sendNotificationToUser) {
-      await socketService.sendNotificationToUser(
-        receiverId,
-        'NEW_MESSAGE',
-        'You have a new message',
-        message,
-        { jobId, senderId }
-      );
+    if (socketService) {
+      await socketService.handleNewMessage(chatRoomId, senderId, message);
     }
 
-    return handleResponse(201, 'Message sent successfully', { chatMessage }, res);
+    return handleResponse(200, 'Message sent successfully', null, res);
   });
 
   static getChatMessages = asyncHandler(async (req, res) => {
-    const { jobId, contractorId } = req.params;
-    const userId = req.user.id;
-
-    const contractor = await prisma.contractor.findUnique({ where: { id: contractorId } });
-    if (!contractor) {
-      return handleResponse(404, 'Contractor not found', null, res);
-    }
+    const { chatRoomId } = req.params;
 
     const messages = await prisma.chatMessage.findMany({
       where: {
-        jobId,
-        OR: [
-          { senderId: userId, receiverId: contractor.userId },
-          { senderId: contractor.userId, receiverId: userId },
-        ],
+        chatRoomId,
       },
       orderBy: {
         createdAt: 'asc',
+      },
+      include: {
+        sender: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            profileImage: true,
+          },
+        },
       },
     });
 

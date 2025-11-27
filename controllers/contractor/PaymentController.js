@@ -99,8 +99,7 @@ class PaymentController {
     const [
       completedJobs,
       totalEarnings,
-      serviceCharges,
-      netEarnings,
+      totalCommissions,
       pendingPayouts,
       monthlyEarnings
     ] = await Promise.all([
@@ -115,6 +114,9 @@ class PaymentController {
           payments: {
             where: {
               status: 'COMPLETED'
+            },
+            include: {
+              commissions: true
             }
           },
           user: {
@@ -138,24 +140,15 @@ class PaymentController {
         _sum: { amount: true },
         _count: { id: true }
       }),
-      // Service charges (platform commission)
-      prisma.payment.aggregate({
+      // Total commissions deducted
+      prisma.commission.aggregate({
         where: {
-          job: {
-            contractorId: contractor.id
+          payment: {
+            job: {
+              contractorId: contractor.id
+            },
+            status: 'COMPLETED'
           },
-          status: 'COMPLETED',
-          ...dateFilter
-        },
-        _sum: { amount: true }
-      }),
-      // Net earnings calculation
-      prisma.payment.aggregate({
-        where: {
-          job: {
-            contractorId: contractor.id
-          },
-          status: 'COMPLETED',
           ...dateFilter
         },
         _sum: { amount: true }
@@ -177,9 +170,10 @@ class PaymentController {
           DATE_TRUNC('month', p.created_at) as month,
           COUNT(*) as job_count,
           SUM(p.amount) as total_earnings,
-          SUM(p.amount) * ${parseFloat(process.env.SERVICE_CHARGE_PERCENT || 5) / 100} as service_charges,
-          SUM(p.amount) * (1 - ${parseFloat(process.env.SERVICE_CHARGE_PERCENT || 5) / 100}) as net_earnings
+          SUM(COALESCE(c.amount, 0)) as commissions,
+          SUM(p.amount) - SUM(COALESCE(c.amount, 0)) as net_earnings
         FROM payments p
+        LEFT JOIN commissions c ON p.id = c.payment_id
         JOIN jobs j ON p.job_id = j.id
         WHERE j.contractor_id = ${contractor.id}
         AND p.status = 'COMPLETED'
@@ -190,22 +184,23 @@ class PaymentController {
       `
     ]);
 
-    const serviceChargeRate = parseFloat(process.env.SERVICE_CHARGE_PERCENT || 5) / 100;
-    const totalServiceCharges = (serviceCharges._sum.amount || 0) * serviceChargeRate;
-    const netEarningsAmount = (netEarnings._sum.amount || 0) - totalServiceCharges;
+    const totalCommissionAmount = totalCommissions._sum.amount || 0;
+    const netEarningsAmount = (totalEarnings._sum.amount || 0) - totalCommissionAmount;
 
     // Calculate earnings per job
     const jobEarnings = completedJobs.map(job => {
       const jobTotal = job.payments.reduce((sum, payment) => sum + payment.amount, 0);
-      const jobServiceCharge = jobTotal * serviceChargeRate;
-      const jobNetEarnings = jobTotal - jobServiceCharge;
+      const jobCommission = job.payments.reduce((sum, payment) => {
+        return sum + (payment.commissions?.reduce((s, c) => s + c.amount, 0) || 0);
+      }, 0);
+      const jobNetEarnings = jobTotal - jobCommission;
 
       return {
         jobId: job.id,
         jobTitle: job.title,
         customer: job.user,
         totalEarnings: jobTotal,
-        serviceCharge: jobServiceCharge,
+        commission: jobCommission,
         netEarnings: jobNetEarnings,
         completedAt: job.updatedAt
       };
@@ -216,10 +211,10 @@ class PaymentController {
         totalJobs: completedJobs.length,
         totalEarnings: totalEarnings._sum.amount || 0,
         totalTransactions: totalEarnings._count || 0,
-        serviceCharges: totalServiceCharges,
+        commissions: totalCommissionAmount,
         netEarnings: netEarningsAmount,
-        pendingPayouts: pendingPayouts._sum.amount || 0,
-        serviceChargeRate: serviceChargeRate * 100
+        pendingPayouts: pendingPayouts._sum.amount || 0
+
       },
       jobEarnings,
       monthlyEarnings
@@ -457,6 +452,86 @@ class PaymentController {
         ifscCode: updatedContractor.bankIfscCode,
         businessName: updatedContractor.businessName
       }
+    });
+  });
+
+  // Get commission details
+  static getCommissionDetails = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const { page = 1, limit = 10, startDate, endDate } = req.query;
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    // Get contractor
+    const contractor = await prisma.contractor.findUnique({
+      where: { userId }
+    });
+
+    if (!contractor) {
+      return res.status(404).json({
+        error: 'Contractor profile not found',
+        message: 'Please create a contractor profile first'
+      });
+    }
+
+    const where = {
+      payment: {
+        job: {
+          contractorId: contractor.id
+        }
+      }
+    };
+
+    if (startDate && endDate) {
+      where.createdAt = {
+        gte: new Date(startDate),
+        lte: new Date(endDate)
+      };
+    }
+
+    const [commissions, total] = await Promise.all([
+      prisma.commission.findMany({
+        where,
+        include: {
+          payment: {
+            select: {
+              id: true,
+              amount: true,
+              status: true,
+              createdAt: true
+            }
+          },
+          job: {
+            select: {
+              id: true,
+              title: true,
+              jobType: true
+            }
+          }
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: parseInt(limit)
+      }),
+      prisma.commission.count({ where })
+    ]);
+
+    const paginationMeta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
+
+    res.json({
+      commissions: commissions.map(c => ({
+        id: c.id,
+        jobId: c.jobId,
+        jobTitle: c.job.title,
+        jobType: c.job.jobType,
+        amount: c.amount,
+        paymentId: c.payment.id,
+        paymentAmount: c.payment.amount,
+        paymentStatus: c.payment.status,
+        netAmount: c.payment.amount - c.amount,
+        createdAt: c.createdAt
+      })),
+      pagination: paginationMeta
     });
   });
 }

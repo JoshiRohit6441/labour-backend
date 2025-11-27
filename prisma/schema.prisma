@@ -8,7 +8,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Enums
 enum UserRole {
   ADMIN
   STAFF
@@ -38,6 +37,7 @@ enum JobStatus {
   COMPLETED
   CANCELLED
   DISPUTED
+  EXPIRED
 }
 
 enum PaymentStatus {
@@ -82,47 +82,71 @@ enum PaymentType {
   FINAL
 }
 
-// User Management
-model User {
-  id           String   @id @default(cuid())
-  email        String?  @unique
-  phone        String   @unique
-  password     String?
-  firstName    String
-  lastName     String
-  role         UserRole @default(USER)
-  status       UserStatus @default(PENDING_VERIFICATION)
-  profileImage String?
-  dateOfBirth  DateTime?
-  address      String?
-  city         String?
-  state        String?
-  pincode      String?
-  latitude     Float?
-  longitude    Float?
-  isVerified   Boolean  @default(false)
-  isGuest      Boolean  @default(false)
-  lastLoginAt  DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+enum CommissionStatus {
+  PENDING
+  PROCESSED
+  PAID
+}
 
-  // Relations
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id             String   @id @default(cuid())
+  email          String?  @unique
+  phone          String   @unique
+  password       String?
+  firstName      String
+  lastName       String
+  role           UserRole @default(USER)
+  status         UserStatus @default(PENDING_VERIFICATION)
+  profileImage   String?
+  dateOfBirth    DateTime?
+  address        String?
+  city           String?
+  state          String?
+  pincode        String?
+  latitude       Float?
+  longitude      Float?
+  isVerified     Boolean  @default(false)
+  isGuest        Boolean  @default(false)
+  lastLoginAt    DateTime?
+  fcmToken       String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
   contractorProfile Contractor?
-  jobsAsUser        Job[]        @relation("JobUser")
-  reviewsGiven      Review[]     @relation("ReviewGiver")
-  reviewsReceived   Review[]     @relation("ReviewReceiver")
+  jobsAsUser        Job[]          @relation("JobUser")
+  reviewsGiven      Review[]       @relation("ReviewGiver")
+  reviewsReceived   Review[]       @relation("ReviewReceiver")
   notifications     Notification[]
   payments          Payment[]
   documents         Document[]
   locationUpdates   LocationUpdate[]
   chatMessages      ChatMessage[]
-  chatRooms         ChatRoom[]   @relation("ChatRoomParticipants")
-
+  chatRooms         ChatRoom[]     @relation("ChatRoomParticipants")
+  pushSubscriptions PushSubscription[]
+  commissionsApproved Commission[] @relation("CommissionApprover")
 
   @@map("users")
 }
 
-// Contractor Profile
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("push_subscriptions")
+}
+
 model Contractor {
   id                String   @id @default(cuid())
   userId            String   @unique
@@ -141,25 +165,25 @@ model Contractor {
   rating            Float    @default(0.0)
   totalJobs         Int      @default(0)
   completedJobs     Int      @default(0)
+  verificationStatus VerificationStatus @default(PENDING)
   bankAccountNumber String?
   bankIfscCode      String?
   bankAccountName   String?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
-  // Relations
-  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  workers Worker[]
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workers   Worker[]
   rateCards RateCard[]
-  jobs    Job[]    @relation("JobContractor")
-  reviews Review[] @relation("ContractorReview")
-  quotes  Quote[]
-  meetings Meeting[]
+  jobs      Job[]    @relation("JobContractor")
+  reviews   Review[] @relation("ContractorReview")
+  quotes    Quote[]
+  meetings  Meeting[]
+  documents Document[]
 
   @@map("contractors")
 }
 
-// Worker Management
 model Worker {
   id            String   @id @default(cuid())
   contractorId  String
@@ -180,9 +204,8 @@ model Worker {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  // Relations
-  contractor     Contractor      @relation(fields: [contractorId], references: [id], onDelete: Cascade)
-  availability   Availability[]
+  contractor   Contractor      @relation(fields: [contractorId], references: [id], onDelete: Cascade)
+  availability Availability[]
   jobAssignments JobAssignment[]
   documents      Document[]
   reviews        Review[]        @relation("WorkerReview")
@@ -190,7 +213,6 @@ model Worker {
   @@map("workers")
 }
 
-// Rate Cards
 model RateCard {
   id            String   @id @default(cuid())
   contractorId  String
@@ -204,13 +226,11 @@ model RateCard {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  // Relations
   contractor Contractor @relation(fields: [contractorId], references: [id], onDelete: Cascade)
 
   @@map("rate_cards")
 }
 
-// Availability Management
 model Availability {
   id          String   @id @default(cuid())
   workerId    String
@@ -221,22 +241,20 @@ model Availability {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  // Relations
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
   @@unique([workerId, date, timeSlot])
   @@map("availability")
 }
 
-// Job Management
 model Job {
-  id                      String             @id @default(cuid())
+  id                      String   @id @default(cuid())
   userId                  String
   contractorId            String?
   title                   String
   description             String
   jobType                 JobType
-  status                  JobStatus          @default(PENDING)
+  status                  JobStatus @default(PENDING)
   address                 String
   city                    String
   state                   String
@@ -254,33 +272,34 @@ model Job {
   scheduledDate           DateTime?
   scheduledTime           String?
   estimatedDuration       Int?
-  numberOfWorkers         Int                @default(1)
+  numberOfWorkers         Int       @default(1)
   requiredSkills          String[]
   images                  String[]
   budget                  Float?
   acceptedQuote           Float?
-  acceptedQuoteId         String?            @unique
-  advancePaid             Float              @default(0.0)
-  totalPaid               Float              @default(0.0)
-  isLocationTracking      Boolean            @default(false)
+  acceptedQuoteId         String?   @unique
+  advancePaid             Float     @default(0.0)
+  totalPaid               Float     @default(0.0)
+  isLocationTracking      Boolean   @default(false)
   cancellationReason      String?
   cancelledBy             UserRole?
   locationSharingCode     String?
   locationSharingWorkerPhone String?
   locationSharingCodeExpiresAt DateTime?
   travelStatus            String?
+  expiresAt               DateTime?
 
-  createdAt               DateTime           @default(now())
-  updatedAt               DateTime           @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  // Relations
-  user            User             @relation("JobUser", fields: [userId], references: [id])
-  contractor      Contractor?      @relation("JobContractor", fields: [contractorId], references: [id])
+  user            User        @relation("JobUser", fields: [userId], references: [id])
+  contractor      Contractor? @relation("JobContractor", fields: [contractorId], references: [id])
   quotes          Quote[]
-  acceptedQuoteRel Quote?          @relation("AcceptedQuote", fields: [acceptedQuoteId], references: [id])
+  acceptedQuoteRel Quote?     @relation("AcceptedQuote", fields: [acceptedQuoteId], references: [id])
   assignments     JobAssignment[]
-  reviews         Review[]         @relation("JobReview")
+  reviews         Review[]    @relation("JobReview")
   payments        Payment[]
+  commissions     Commission[]
   locationUpdates LocationUpdate[]
   chatRoom        ChatRoom?
   meetings        Meeting[]
@@ -291,7 +310,6 @@ model Job {
   @@index([latitude, longitude], name: "location_idx")
 }
 
-// Quote Management
 model Quote {
   id                 String      @id @default(cuid())
   jobId              String
@@ -311,15 +329,13 @@ model Quote {
   createdAt          DateTime    @default(now())
   updatedAt          DateTime    @updatedAt
 
-  // Relations
-  job            Job         @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  contractor     Contractor  @relation(fields: [contractorId], references: [id])
-  acceptedForJob Job?        @relation("AcceptedQuote")
+  job        Job        @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  contractor Contractor @relation(fields: [contractorId], references: [id])
+  acceptedForJob Job?   @relation("AcceptedQuote")
 
   @@map("quotes")
 }
 
-// Job Assignment
 model JobAssignment {
   id          String   @id @default(cuid())
   jobId       String
@@ -329,7 +345,6 @@ model JobAssignment {
   completedAt DateTime?
   status      String   @default("assigned")
 
-  // Relations
   job    Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id])
 
@@ -337,7 +352,6 @@ model JobAssignment {
   @@map("job_assignments")
 }
 
-// Review System
 model Review {
   id           String     @id @default(cuid())
   jobId        String
@@ -348,7 +362,6 @@ model Review {
   comment      String?
   createdAt    DateTime   @default(now())
 
-  // Relations
   job        Job         @relation("JobReview", fields: [jobId], references: [id])
   giver      User        @relation("ReviewGiver", fields: [giverId], references: [id])
   receiver   User        @relation("ReviewReceiver", fields: [receiverId], references: [id], map: "review_receiver_user_fkey")
@@ -359,7 +372,36 @@ model Review {
   @@map("reviews")
 }
 
-// Payment Management
+model AdminSettings {
+  id             String @id @default(cuid())
+  commissionRate Float  @default(0.1)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("admin_settings")
+}
+
+model Commission {
+  id              String           @id @default(cuid())
+  jobId           String
+  paymentId       String
+  amount          Float
+  status          CommissionStatus @default(PENDING)
+  approvalStatus  ApprovalStatus   @default(PENDING)
+  approvedBy      String?
+  approvedAt      DateTime?
+  rejectionReason String?
+  adminNotes      String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  job     Job     @relation(fields: [jobId], references: [id])
+  payment Payment @relation(fields: [paymentId], references: [id])
+  approver User?  @relation("CommissionApprover", fields: [approvedBy], references: [id])
+
+  @@map("commissions")
+}
+
 model Payment {
   id              String        @id @default(cuid())
   jobId           String
@@ -376,17 +418,17 @@ model Payment {
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
-  // Relations
   job  Job  @relation(fields: [jobId], references: [id])
   user User @relation(fields: [userId], references: [id])
+  commissions Commission[]
 
   @@map("payments")
 }
 
-// Document Management
 model Document {
   id                 String             @id @default(cuid())
   userId             String?
+  contractorId       String?
   workerId           String?
   documentType       String
   documentNumber     String?
@@ -398,32 +440,29 @@ model Document {
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
-  // Relations
-  user   User?   @relation(fields: [userId], references: [id])
-  worker Worker? @relation(fields: [workerId], references: [id])
+  user       User?        @relation(fields: [userId], references: [id])
+  contractor Contractor?  @relation(fields: [contractorId], references: [id])
+  worker     Worker?      @relation(fields: [workerId], references: [id])
 
   @@map("documents")
 }
 
-// Notification System
 model Notification {
-  id      String           @id @default(cuid())
-  userId  String
-  type    NotificationType
-  title   String
-  message String
-  data    Json?
-  isRead  Boolean          @default(false)
-  sentAt  DateTime         @default(now())
-  readAt  DateTime?
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  message   String
+  data      Json?
+  isRead    Boolean          @default(false)
+  sentAt    DateTime         @default(now())
+  readAt    DateTime?
 
-  // Relations
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("notifications")
 }
 
-// Location Tracking
 model LocationUpdate {
   id        String   @id @default(cuid())
   userId    String
@@ -433,7 +472,6 @@ model LocationUpdate {
   accuracy  Float?
   timestamp DateTime @default(now())
 
-  // Relations
   user User @relation(fields: [userId], references: [id])
   job  Job  @relation(fields: [jobId], references: [id])
 
@@ -456,13 +494,13 @@ model Meeting {
   notes        String?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
-  job          Job           @relation(fields: [jobId], references: [id])
-  contractor   Contractor    @relation(fields: [contractorId], references: [id])
+
+  job        Job        @relation(fields: [jobId], references: [id])
+  contractor Contractor @relation(fields: [contractorId], references: [id])
 
   @@map("meetings")
 }
 
-// Chat System
 model ChatRoom {
   id           String        @id @default(cuid())
   jobId        String        @unique
@@ -478,17 +516,17 @@ model ChatRoom {
 model ChatMessage {
   id         String   @id @default(cuid())
   chatRoomId String
-  chatRoom   ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
   senderId   String
-  sender     User     @relation(fields: [senderId], references: [id])
   message    String
   read       Boolean  @default(false)
   createdAt  DateTime @default(now())
 
+  chatRoom ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+  sender   User     @relation(fields: [senderId], references: [id])
+
   @@map("chat_messages")
 }
 
-// Audit Logs
 model AuditLog {
   id         String   @id @default(cuid())
   userId     String?

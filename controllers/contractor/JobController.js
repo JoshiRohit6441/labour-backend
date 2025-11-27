@@ -1,4 +1,3 @@
-
 import prisma from '../../config/database.js';
 import { calculateDistance, generatePaginationMeta } from '../../utils/helpers.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
@@ -177,7 +176,7 @@ class JobController {
       return handleResponse(404, 'Job not found', null, res);
     }
 
-    await redisClient.set(cacheKey, JSON.stringify(job), { EX: 3600 }); // Cache for 1 hour
+    await redisClient.set(cacheKey, JSON.stringify(job), { EX: 3600 });
 
     return handleResponse(200, 'Job details fetched', { job }, res);
   });
@@ -285,7 +284,7 @@ class JobController {
   static submitQuote = asyncHandler(async (req, res) => {
     const { jobId } = req.params;
     const userId = req.user.id;
-    const { totalAmount, notes, addOns, meetingScheduledOn } = req.body;
+    const { amount, totalAmount, notes, addOns, meetingScheduledOn, estimatedArrival } = req.body;
     const files = req.files;
 
     const contractor = await prisma.contractor.findUnique({ where: { userId } });
@@ -309,19 +308,27 @@ class JobController {
         const uploadResults = await Promise.all(uploadPromises);
         documentUrls = uploadResults.map(result => result.secure_url);
       } catch (error) {
-        console.error('Cloudinary upload failed:', error);
         return handleResponse(500, 'Failed to upload documents.', null, res);
       }
+    }
+
+    // Use totalAmount if provided, otherwise use amount
+    const quoteAmount = totalAmount ? parseFloat(totalAmount) : (amount ? parseFloat(amount) : null);
+
+    if (!quoteAmount) {
+      return handleResponse(400, 'Quote amount is required', null, res);
     }
 
     const quoteData = {
       jobId,
       contractorId: contractor.id,
-      totalAmount: parseFloat(totalAmount),
+      amount: quoteAmount,
+      totalAmount: totalAmount ? parseFloat(totalAmount) : undefined,
       notes,
-      addOns: addOns ? JSON.parse(addOns) : undefined,
-      documents: documentUrls,
+      addOns: addOns ? (typeof addOns === 'string' ? JSON.parse(addOns) : addOns) : undefined,
+      documents: documentUrls.length > 0 ? documentUrls : undefined,
       meetingScheduledOn: meetingScheduledOn ? new Date(meetingScheduledOn) : undefined,
+      estimatedArrival: estimatedArrival || undefined,
     };
 
     const quote = await prisma.quote.upsert({
@@ -362,7 +369,6 @@ class JobController {
         );
       }
     } catch (e) {
-      console.error('Failed to notify user for new quote:', e);
     }
 
     return handleResponse(201, 'Quote submitted successfully', { quote }, res);
@@ -433,6 +439,10 @@ class JobController {
       return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
 
+    if (contractor.verificationStatus !== 'VERIFIED') {
+      return handleResponse(403, 'Your business profile must be verified to claim jobs', null, res);
+    }
+
     const job = await prisma.job.findUnique({ where: { id: jobId } });
     if (!job) {
       return handleResponse(404, 'The requested job was not found', null, res);
@@ -442,98 +452,99 @@ class JobController {
       return handleResponse(400, 'Only IMMEDIATE or SCHEDULED jobs can be claimed by contractors', null, res);
     }
 
-    // Validate worker count requirement
     const workersRequired = job.workersNeeded || job.numberOfWorkers || 1;
-    if (!workerIds || workerIds.length === 0) {
+
+    if (!workerIds.length) {
       return handleResponse(400, `This job requires ${workersRequired} worker(s). Please select workers.`, null, res);
     }
+
     if (workerIds.length < workersRequired) {
-      return handleResponse(400, `This job requires at least ${workersRequired} worker(s). You selected ${workerIds.length}.`, null, res);
+      return handleResponse(400, `This job requires at least ${workersRequired} worker(s).`, null, res);
     }
 
-    // ACID transaction: lock and assign workers atomically
-    const txResult = await prisma.$transaction(async (tx) => {
-      // lock via conditional update
+    const { ok, customerId } = await prisma.$transaction(async (tx) => {
       const updatedCount = await tx.job.updateMany({
         where: { id: jobId, contractorId: null, status: { in: ['PENDING', 'QUOTED'] } },
         data: { contractorId: contractor.id, status: 'ACCEPTED' }
       });
 
-      if (updatedCount.count === 0) {
-        return { ok: false };
-      }
+      if (updatedCount.count === 0) return { ok: false };
 
-      // Validate and assign workers
-      if (workerIds && workerIds.length > 0) {
-        // For SCHEDULED jobs, check worker availability
-        if (job.jobType === 'SCHEDULED' && job.scheduledStartDate) {
-          const scheduledDate = new Date(job.scheduledStartDate);
-          const unavailableWorkers = await tx.availability.findMany({
-            where: {
-              workerId: { in: workerIds },
-              date: scheduledDate,
-              isAvailable: false
-            },
-            select: { workerId: true }
-          });
-          if (unavailableWorkers.length > 0) {
-            throw new Error(`Some selected workers are not available on ${scheduledDate.toLocaleDateString()}`);
-          }
-        }
-
-        const workers = await tx.worker.findMany({
-          where: { id: { in: workerIds }, contractorId: contractor.id }
+      if (job.jobType === 'SCHEDULED' && job.scheduledStartDate) {
+        const unavailableWorkers = await tx.availability.findMany({
+          where: {
+            workerId: { in: workerIds },
+            date: new Date(job.scheduledStartDate),
+            isAvailable: false,
+          },
+          select: { workerId: true },
         });
-        if (workers.length !== workerIds.length) {
-          throw new Error('Some workers do not belong to your contractor profile');
-        }
-        for (const wid of workerIds) {
-          await tx.jobAssignment.create({ data: { jobId, workerId: wid } });
+
+        if (unavailableWorkers.length > 0) {
+          throw new Error("Some selected workers are not available for this job date");
         }
       }
 
-      // Create or update chat room and connect participants
-      const chatRoom = await tx.chatRoom.upsert({
-        where: { jobId },
-        update: { participants: { connect: [{ id: userId }, { id: job.userId }] } },
-        create: {
-          jobId,
-          participants: { connect: [{ id: userId }, { id: job.userId }] }
-        },
+      const workers = await tx.worker.findMany({
+        where: { id: { in: workerIds }, contractorId: contractor.id }
       });
 
-      return { ok: true };
-    });
+      if (workers.length !== workerIds.length) {
+        throw new Error('Some workers do not belong to your contractor profile');
+      }
 
-    if (!txResult.ok) {
+      await tx.jobAssignment.deleteMany({ where: { jobId } });
+
+      await tx.jobAssignment.createMany({
+        data: workerIds.map((wid) => ({ jobId, workerId: wid })),
+      });
+
+      return { ok: true, customerId: job.userId };
+    }, { timeout: 20000 });
+
+    if (!ok) {
       return handleResponse(409, 'This job has already been accepted by another contractor', null, res);
     }
 
-    // Notify user that job has been accepted
+    await prisma.chatRoom.upsert({
+      where: { jobId },
+      update: {
+        participants: {
+          connect: [{ id: userId }, { id: customerId }],
+        },
+      },
+      create: {
+        jobId,
+        participants: {
+          connect: [{ id: userId }, { id: customerId }],
+        },
+      },
+    });
+
     try {
       const socketService = req.app.get('socketService');
-      if (socketService && socketService.sendNotificationToUser) {
+
+      if (socketService?.sendNotificationToUser) {
         await socketService.sendNotificationToUser(
-          job.userId,
+          customerId,
           'JOB_ACCEPTED',
           'Your job was accepted',
           `${contractor.businessName} accepted your job`,
           { jobId, contractorId: contractor.id, cta: 'SEE_JOB' }
         );
-        // Also emit the job_accepted event for frontend listeners
-        socketService.io.to(`user_${job.userId}`).emit('job_accepted', {
+
+        socketService.io.to(`user_${customerId}`).emit('job_accepted', {
           jobId,
-          message: `${contractor.businessName} accepted your job`,
+          contractorId: contractor.id,
           contractorName: contractor.businessName
         });
       }
-    } catch (e) {
-      console.error('Failed to notify user for job accepted:', e);
-    }
+    } catch (_) { }
 
     const updated = await prisma.job.findUnique({ where: { id: jobId } });
     return handleResponse(200, 'Job claimed successfully', { job: updated }, res);
   });
+
 
   // Update quote
   static updateQuote = asyncHandler(async (req, res) => {
@@ -725,7 +736,6 @@ class JobController {
         );
       }
     } catch (e) {
-      console.error('Failed to notify user about job start:', e);
     }
 
     return handleResponse(200, 'Job started successfully', { job: updatedJob }, res);
@@ -800,7 +810,6 @@ class JobController {
         );
       }
     } catch (e) {
-      console.error('Failed to notify user about job completion:', e);
     }
     // TODO: Request reviews
 
@@ -1042,7 +1051,6 @@ class JobController {
         );
       }
     } catch (e) {
-      console.error('Failed to notify user about job cancellation:', e);
     }
 
     return handleResponse(200, 'Job cancelled successfully', { job: updatedJob }, res);
@@ -1091,8 +1099,77 @@ class JobController {
 
     return handleResponse(200, 'Location shared successfully', { job: updatedJob }, res);
   });
+
+  static acceptOffer = asyncHandler(async (req, res) => {
+    const { jobId } = req.params;
+    const userId = req.user.id;
+
+    const contractor = await prisma.contractor.findUnique({ where: { userId } });
+    if (!contractor) {
+      return handleResponse(404, 'Please create a contractor profile first', null, res);
+    }
+
+    if (contractor.verificationStatus !== 'VERIFIED') {
+      return handleResponse(403, 'Your business profile must be verified to accept job offers', null, res);
+    }
+
+    const job = await prisma.job.findFirst({
+      where: {
+        id: jobId,
+        contractorId: contractor.id,
+        status: 'OFFERED',
+      },
+    });
+
+    if (!job) {
+      return handleResponse(404, 'Job offer not found or has expired', null, res);
+    }
+
+    const updatedJob = await prisma.job.update({
+      where: { id: jobId },
+      data: { status: 'ACCEPTED' },
+    });
+
+    // Notify user
+    try {
+      const socketService = req.app.get('socketService');
+      if (socketService && socketService.sendNotificationToUser) {
+        await socketService.sendNotificationToUser(
+          job.userId,
+          'JOB_ACCEPTED',
+          'Your job offer was accepted!',
+          `Contractor ${contractor.businessName} has accepted your job offer for "${job.title}".`,
+          { jobId, contractorId: contractor.id }
+        );
+      }
+    } catch (e) {
+      // Silently handle notification errors
+    }    // Notify other contractors
+    try {
+      const allQuotes = await prisma.quote.findMany({
+        where: { jobId, contractorId: { not: contractor.id } },
+        include: { contractor: { select: { userId: true } } },
+      });
+
+      const socketService = req.app.get('socketService');
+      if (socketService && socketService.sendNotificationToUser) {
+        for (const otherQuote of allQuotes) {
+          if (otherQuote.contractor.userId) {
+            await socketService.sendNotificationToUser(
+              otherQuote.contractor.userId,
+              'QUOTE_REJECTED',
+              'Your quote was not selected',
+              `Another contractor was selected for ${job.title || 'the job'}`,
+              { jobId, quoteId: otherQuote.id }
+            );
+          }
+        }
+      }
+    } catch (e) {
+      // Silently handle notification errors
+    } return handleResponse(200, 'Job offer accepted successfully', { job: updatedJob }, res);
+  });
 }
 
 
 export default JobController;
-

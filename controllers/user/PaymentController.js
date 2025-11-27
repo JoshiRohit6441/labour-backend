@@ -2,23 +2,127 @@ import prisma from '../../config/database.js';
 import razorpay from '../../config/razorpayConfig.js';
 import { generatePaginationMeta } from '../../utils/helpers.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
+import crypto from 'crypto';
+import logger from '../../utils/logger.js';
 
 class PaymentController {
   // Razorpay webhook handler (public)
   static handleWebhook = asyncHandler(async (req, res) => {
-    // For now, acknowledge receipt to avoid retries. Implement signature verification if needed.
+    const event = req.body;
+    const razorpaySignature = req.headers['x-razorpay-signature'];
+
+    // Verify webhook signature
+    if (!razorpaySignature) {
+      logger.warn('Webhook received without signature header');
+      return res.status(400).json({
+        error: 'Unauthorized',
+        message: 'Webhook signature missing'
+      });
+    }
+
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    if (!webhookSecret) {
+      logger.error('RAZORPAY_WEBHOOK_SECRET not configured');
+      return res.status(500).json({
+        error: 'Server error',
+        message: 'Webhook configuration incomplete'
+      });
+    }
+
+    const expectedSignature = crypto
+      .createHmac('sha256', webhookSecret)
+      .update(JSON.stringify(event))
+      .digest('hex');
+
+    if (expectedSignature !== razorpaySignature) {
+      logger.warn('Webhook signature verification failed', {
+        received: razorpaySignature,
+        expected: expectedSignature
+      });
+      return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Webhook signature verification failed'
+      });
+    }
+
     try {
-      const event = req.body;
+      const eventType = event?.event || 'unknown';
+      
+      // Log webhook receipt
+      logger.info('Webhook received and verified', {
+        eventType,
+        paymentId: event?.payload?.payment?.entity?.id
+      });
+
+      // Persist webhook event
       await prisma.webhookEvent?.create?.({
         data: {
           provider: 'razorpay',
-          eventType: event?.event || 'unknown',
+          eventType: eventType,
           payload: event,
         }
-      }).catch(() => {});
+      }).catch((err) => {
+        logger.error('Failed to persist webhook event', { error: err.message, eventType });
+      });
+
+      // Handle payment.authorized event
+      if (eventType === 'payment.authorized') {
+        const paymentEntity = event?.payload?.payment?.entity;
+        if (paymentEntity) {
+          logger.info('Processing authorized payment', {
+            razorpayPaymentId: paymentEntity.id,
+            amount: paymentEntity.amount
+          });
+          
+          // Update payment status if needed
+          const payment = await prisma.payment.findFirst({
+            where: { gatewayId: paymentEntity.id }
+          });
+          
+          if (payment && payment.status === 'PENDING') {
+            await prisma.payment.update({
+              where: { id: payment.id },
+              data: { status: 'AUTHORIZED' }
+            });
+          }
+        }
+      }
+
+      // Handle payment.failed event
+      if (eventType === 'payment.failed') {
+        const paymentEntity = event?.payload?.payment?.entity;
+        if (paymentEntity) {
+          logger.warn('Payment failed via webhook', {
+            razorpayPaymentId: paymentEntity.id,
+            reason: paymentEntity.error_reason
+          });
+          
+          const payment = await prisma.payment.findFirst({
+            where: { gatewayId: paymentEntity.id }
+          });
+          
+          if (payment && payment.status === 'PENDING') {
+            await prisma.payment.update({
+              where: { id: payment.id },
+              data: { 
+                status: 'FAILED',
+                gatewayResponse: {
+                  reason: paymentEntity.error_reason,
+                  description: paymentEntity.error_description
+                }
+              }
+            });
+          }
+        }
+      }
     } catch (e) {
-      // ignore persistence errors for now
+      logger.error('Error processing webhook', {
+        error: e.message,
+        eventType: event?.event
+      });
+      // Still return 200 to Razorpay to acknowledge receipt and prevent retries
     }
+
     res.status(200).json({ received: true });
   });
   // Create payment order
@@ -26,16 +130,36 @@ class PaymentController {
     const { jobId, amount, paymentType } = req.body;
     const userId = req.user.id;
 
+    // Validate amount input
+    const parsedAmount = parseFloat(amount);
+    if (!amount || isNaN(parsedAmount) || parsedAmount <= 0) {
+      return res.status(400).json({
+        error: 'Invalid amount',
+        message: 'Payment amount must be a positive number'
+      });
+    }
+
+    const MAX_PAYMENT_AMOUNT = 1000000; // 10 lakh rupees
+    if (parsedAmount > MAX_PAYMENT_AMOUNT) {
+      return res.status(400).json({
+        error: 'Invalid amount',
+        message: `Payment amount cannot exceed ₹${MAX_PAYMENT_AMOUNT}`
+      });
+    }
+
     const job = await prisma.job.findFirst({
       where: { id: jobId, userId },
       include: { quotes: { where: { id: { equals: prisma.job.fields.acceptedQuoteId } } } }
     });
 
     if (!job) {
-      return handleResponse(404, 'Job not found or you do not have permission to make payments', null, res);
+      return res.status(404).json({
+        error: 'Job not found',
+        message: 'Job not found or you do not have permission to make payments'
+      });
     }
 
-    let finalAmount = amount;
+    let finalAmount = parsedAmount;
 
     if (paymentType === 'ADVANCE') {
       const acceptedQuote = job.quotes[0];
@@ -101,7 +225,12 @@ class PaymentController {
         }
       });
     } catch (error) {
-      console.error('Razorpay order creation failed:', error);
+      logger.error('Failed to create payment order', {
+        error: error.message,
+        jobId,
+        userId,
+        amount: totalAmount
+      });
       res.status(500).json({
         error: 'Payment order creation failed',
         message: 'Unable to create payment order. Please try again.'
@@ -165,6 +294,19 @@ class PaymentController {
         }
       });
 
+      // Calculate and store admin commission
+      const adminSettings = await prisma.adminSettings.findFirst();
+      const commissionRate = adminSettings?.commissionRate || 0.1; // Default 10%
+      const commissionAmount = updatedPayment.amount * commissionRate;
+
+      await prisma.commission.create({
+        data: {
+          jobId: updatedPayment.jobId,
+          paymentId: updatedPayment.id,
+          amount: commissionAmount,
+        },
+      });
+
       // Update job payment status
       if (payment.paymentType === 'advance') {
         await prisma.job.update({
@@ -188,7 +330,12 @@ class PaymentController {
         payment: updatedPayment
       });
     } catch (error) {
-      console.error('Payment verification failed:', error);
+      logger.error('Error verifying payment', {
+        error: error.message,
+        paymentId,
+        razorpayPaymentId,
+        stack: error.stack
+      });
       
       // Update payment as failed
       await prisma.payment.update({
@@ -197,6 +344,11 @@ class PaymentController {
           status: 'FAILED',
           gatewayResponse: { error: error.message }
         }
+      }).catch((dbError) => {
+        logger.error('Failed to update payment status after verification error', {
+          error: dbError.message,
+          paymentId
+        });
       });
 
       res.status(500).json({

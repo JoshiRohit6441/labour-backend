@@ -1,255 +1,147 @@
-// import prisma from '../../config/database.js';
-import { formatPhoneNumber, generatePaginationMeta, maskSensitiveData } from '../../utils/helpers.js';
-import { asyncHandler } from '../../middleware/errorHandler.js';
-import { comparePassword, generateRefreshToken, generateToken, hashPassword, storeRefreshToken } from '../../utils/auth.js';
 import prisma from '../../config/database.js';
+import { asyncHandler } from '../../middleware/errorHandler.js';
+import handleResponse from '../../utils/handleResponse.js';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import { generatePaginationMeta } from '../../utils/helpers.js';
 
 class AdminController {
-  // Register Admin
+  // Auth Methods
   static register = asyncHandler(async (req, res) => {
-    const { firstName, lastName, email, phone, password, role = 'ADMIN' } = req.body;
+    const { email, password, firstName, lastName } = req.body;
 
-    // Check if user already exists
-    const existingUser = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { email: email },
-          { phone: formatPhoneNumber(phone) }
-        ]
-      }
-    });
-
-    if (existingUser) {
-      return res.status(409).json({
-        error: 'User already exists',
-        message: 'A user with this email or phone number already exists'
-      });
+    if (!email || !password || !firstName || !lastName) {
+      return handleResponse(400, 'All fields are required.', null, res);
     }
 
-    // Hash password if provided
-    const hashedPassword = password ? await hashPassword(password) : null;
+    const existingAdmin = await prisma.user.findUnique({
+      where: { email }
+    });
 
-    // Create user
-    const user = await prisma.user.create({
+    if (existingAdmin) {
+      return handleResponse(400, 'Email already registered.', null, res);
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const admin = await prisma.user.create({
       data: {
+        email,
+        password: hashedPassword,
         firstName,
         lastName,
-        email,
-        phone: formatPhoneNumber(phone),
-        password: hashedPassword,
-        role,
-        status: 'ACTIVE',
+        role: 'ADMIN',
         isVerified: true
       },
       select: {
         id: true,
+        email: true,
         firstName: true,
         lastName: true,
-        email: true,
-        phone: true,
-        role: true,
-        status: true,
-        isVerified: true,
-        createdAt: true
+        role: true
       }
     });
 
-    res.status(201).json({
-      message: 'Admin registered successfully. ',
-      user: {
-        ...user,
-        phone: maskSensitiveData(user.phone, 'phone'),
-        email: user.email ? maskSensitiveData(user.email, 'email') : null
-      }
-    });
+    return handleResponse(201, 'Admin registered successfully.', { admin }, res);
   });
 
-  // Login Admin
   static login = asyncHandler(async (req, res) => {
-    const { phone, password } = req.body;
+    const { email, password } = req.body;
 
-    // Find user
-    const user = await prisma.user.findUnique({
-      where: { phone: formatPhoneNumber(phone) },
-      include: {
-        contractorProfile: true
+    if (!email || !password) {
+      return handleResponse(400, 'Email and password are required.', null, res);
+    }
+
+    const admin = await prisma.user.findUnique({
+      where: { email }
+    });
+
+    if (!admin || (admin.role !== 'ADMIN' && admin.role !== 'STAFF')) {
+      return handleResponse(401, 'Invalid credentials.', null, res);
+    }
+
+    const passwordMatch = await bcrypt.compare(password, admin.password);
+    if (!passwordMatch) {
+      return handleResponse(401, 'Invalid credentials.', null, res);
+    }
+
+    const token = jwt.sign(
+      { userId: admin.id, role: admin.role },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '7d' }
+    );
+
+    return handleResponse(200, 'Admin logged in successfully.', {
+      token,
+      admin: {
+        id: admin.id,
+        email: admin.email,
+        firstName: admin.firstName,
+        lastName: admin.lastName,
+        role: admin.role
       }
-    });
-
-    if (!user) {
-      return res.status(401).json({
-        error: 'Invalid credentials',
-        message: 'Phone number or password is incorrect'
-      });
-    }
-
-    // Check password if user has one
-    if (user.password && !(await comparePassword(password, user.password))) {
-      return res.status(401).json({
-        error: 'Invalid credentials',
-        message: 'Phone number or password is incorrect'
-      });
-    }
-
-    // Check user status
-    if (user.status === 'SUSPENDED') {
-      return res.status(403).json({
-        error: 'Account suspended',
-        message: 'Your account has been suspended. Please contact support.'
-      });
-    }
-
-    // Update last login
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { lastLoginAt: new Date() }
-    });
-
-    // Generate tokens
-    const tokenPayload = {
-      userId: user.id,
-      role: user.role,
-      isVerified: user.isVerified
-    };
-
-    const accessToken = generateToken(tokenPayload);
-    const refreshToken = generateRefreshToken(tokenPayload);
-
-    // Store refresh token
-    await storeRefreshToken(user.id, refreshToken);
-
-    res.json({
-      message: 'Login successful',
-      user: {
-        id: user.id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: user.email,
-        phone: maskSensitiveData(user.phone, 'phone'),
-        role: user.role,
-        status: user.status,
-        isVerified: user.isVerified,
-        contractorProfile: user.contractorProfile
-      },
-      tokens: {
-        accessToken,
-        refreshToken
-      }
-    });
+    }, res);
   });
 
-  // Get dashboard stats
+  // Dashboard Stats
   static getDashboardStats = asyncHandler(async (req, res) => {
-    const [
+    const [totalUsers, totalContractors, totalJobs, totalPayments, totalRevenue, pendingDocuments] = await Promise.all([
+      prisma.user.count({ where: { role: 'USER' } }),
+      prisma.contractor.count(),
+      prisma.job.count(),
+      prisma.payment.count(),
+      prisma.payment.aggregate({
+        _sum: { amount: true },
+        where: { status: 'COMPLETED' }
+      }),
+      prisma.document.count({ where: { status: 'PENDING' } })
+    ]);
+
+    const stats = {
       totalUsers,
       totalContractors,
       totalJobs,
-      totalWorkers,
-      activeJobs,
-      completedJobs,
-      pendingVerifications,
-      totalRevenue
-    ] = await Promise.all([
-      prisma.user.count(),
-      prisma.contractor.count(),
-      prisma.job.count(),
-      prisma.worker.count(),
-      prisma.job.count({ where: { status: 'IN_PROGRESS' } }),
-      prisma.job.count({ where: { status: 'COMPLETED' } }),
-      prisma.document.count({ where: { verificationStatus: 'PENDING' } }),
-      prisma.payment.aggregate({
-        where: { status: 'COMPLETED' },
-        _sum: { amount: true }
-      })
-    ]);
+      totalPayments,
+      totalRevenue: totalRevenue._sum.amount || 0,
+      pendingDocuments,
+      timestamp: new Date()
+    };
 
-    // Get recent activities
-    const recentJobs = await prisma.job.findMany({
-      take: 5,
-      orderBy: { createdAt: 'desc' },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true
-          }
-        },
-        contractor: {
-          select: {
-            id: true,
-            businessName: true
-          }
-        }
-      }
-    });
-
-    const recentUsers = await prisma.user.findMany({
-      take: 5,
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        firstName: true,
-        lastName: true,
-        email: true,
-        phone: true,
-        role: true,
-        status: true,
-        createdAt: true
-      }
-    });
-
-    res.json({
-      stats: {
-        totalUsers,
-        totalContractors,
-        totalJobs,
-        totalWorkers,
-        activeJobs,
-        completedJobs,
-        pendingVerifications,
-        totalRevenue: totalRevenue._sum.amount || 0
-      },
-      recentActivities: {
-        jobs: recentJobs,
-        users: recentUsers
-      }
-    });
+    return handleResponse(200, 'Dashboard stats retrieved successfully.', stats, res);
   });
 
-  // Get all users
+  // User Management
   static getUsers = asyncHandler(async (req, res) => {
-    const { page = 1, limit = 10, role, status, search } = req.query;
+    const { page = 1, limit = 10, search, status } = req.query;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    const where = {};
+    const where = { role: 'USER' };
 
-    if (role) where.role = role;
-    if (status) where.status = status;
     if (search) {
       where.OR = [
         { firstName: { contains: search, mode: 'insensitive' } },
         { lastName: { contains: search, mode: 'insensitive' } },
         { email: { contains: search, mode: 'insensitive' } },
-        { phone: { contains: search } }
+        { phone: { contains: search, mode: 'insensitive' } }
       ];
     }
+    if (status) where.isVerified = status === 'verified';
 
     const [users, total] = await Promise.all([
       prisma.user.findMany({
         where,
-        include: {
-          contractorProfile: {
-            select: {
-              id: true,
-              businessName: true,
-              isActive: true
-            }
-          },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          phone: true,
+          isVerified: true,
+          createdAt: true,
           _count: {
             select: {
-              jobsAsUser: true,
-              jobsAsContractor: true
+              jobs: true,
+              payments: true
             }
           }
         },
@@ -260,122 +152,85 @@ class AdminController {
       prisma.user.count({ where })
     ]);
 
-    const paginationMeta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
+    const meta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
 
-    res.json({
-      users,
-      pagination: paginationMeta
-    });
+    return handleResponse(200, 'Users retrieved successfully.', { users, meta }, res);
   });
 
-  // Get user details
   static getUserDetails = asyncHandler(async (req, res) => {
     const { userId } = req.params;
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
       include: {
-        contractorProfile: {
-          include: {
-            workers: true,
-            rateCards: true,
-            reviews: {
-              include: {
-                giver: {
-                  select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true
-                  }
-                }
-              }
-            }
+        _count: {
+          select: {
+            jobs: true,
+            bids: true,
+            payments: true
           }
         },
-        jobsAsUser: {
-          include: {
-            contractor: {
-              select: {
-                id: true,
-                businessName: true
-              }
-            }
-          },
-          orderBy: { createdAt: 'desc' },
-          take: 10
-        },
-        jobsAsContractor: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true
-              }
-            }
-          },
-          orderBy: { createdAt: 'desc' },
-          take: 10
-        },
-        documents: true,
-        payments: {
-          orderBy: { createdAt: 'desc' },
-          take: 10
+        jobs: {
+          take: 5,
+          orderBy: { createdAt: 'desc' }
         }
       }
     });
 
     if (!user) {
-      return res.status(404).json({
-        error: 'User not found',
-        message: 'The requested user was not found'
-      });
+      return handleResponse(404, 'User not found.', null, res);
     }
 
-    res.json({ user });
+    return handleResponse(200, 'User details retrieved successfully.', user, res);
   });
 
-  // Update user status
   static updateUserStatus = asyncHandler(async (req, res) => {
     const { userId } = req.params;
-    const { status } = req.body;
+    const { isVerified, isBlocked } = req.body;
 
-    const user = await prisma.user.update({
+    const user = await prisma.user.findUnique({
+      where: { id: userId }
+    });
+
+    if (!user) {
+      return handleResponse(404, 'User not found.', null, res);
+    }
+
+    const updateData = {};
+    if (isVerified !== undefined) updateData.isVerified = isVerified;
+    if (isBlocked !== undefined) updateData.isBlocked = isBlocked;
+
+    const updatedUser = await prisma.user.update({
       where: { id: userId },
-      data: { status },
+      data: updateData,
       select: {
         id: true,
+        email: true,
         firstName: true,
         lastName: true,
-        email: true,
-        phone: true,
-        role: true,
-        status: true
+        isVerified: true,
+        isBlocked: true
       }
     });
 
-    res.json({
-      message: 'User status updated successfully',
-      user
-    });
+    return handleResponse(200, 'User status updated successfully.', updatedUser, res);
   });
 
-  // Get all contractors
+  // Contractor Management
   static getContractors = asyncHandler(async (req, res) => {
-    const { page = 1, limit = 10, isActive, search } = req.query;
+    const { page = 1, limit = 10, search, status } = req.query;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const where = {};
 
-    if (isActive !== undefined) where.isActive = isActive === 'true';
     if (search) {
       where.OR = [
         { businessName: { contains: search, mode: 'insensitive' } },
-        { businessType: { contains: search, mode: 'insensitive' } },
-        { businessCity: { contains: search, mode: 'insensitive' } },
-        { businessState: { contains: search, mode: 'insensitive' } }
+        { businessPhone: { contains: search, mode: 'insensitive' } },
+        { user: { email: { contains: search, mode: 'insensitive' } } }
       ];
     }
+    if (status) where.isVerified = status === 'verified';
 
     const [contractors, total] = await Promise.all([
       prisma.contractor.findMany({
@@ -383,26 +238,15 @@ class AdminController {
         include: {
           user: {
             select: {
-              id: true,
-              firstName: true,
-              lastName: true,
               email: true,
-              phone: true,
-              status: true
-            }
-          },
-          workers: {
-            select: {
-              id: true,
               firstName: true,
-              lastName: true,
-              isActive: true
+              lastName: true
             }
           },
           _count: {
             select: {
               jobs: true,
-              workers: true
+              payments: true
             }
           }
         },
@@ -413,222 +257,52 @@ class AdminController {
       prisma.contractor.count({ where })
     ]);
 
-    const paginationMeta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
+    const meta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
 
-    res.json({
-      contractors,
-      pagination: paginationMeta
-    });
+    return handleResponse(200, 'Contractors retrieved successfully.', { contractors, meta }, res);
   });
 
-  // Update contractor status
   static updateContractorStatus = asyncHandler(async (req, res) => {
     const { contractorId } = req.params;
-    const { isActive } = req.body;
+    const { isVerified, isBlocked } = req.body;
 
-    const contractor = await prisma.contractor.update({
+    const contractor = await prisma.contractor.findUnique({
+      where: { id: contractorId }
+    });
+
+    if (!contractor) {
+      return handleResponse(404, 'Contractor not found.', null, res);
+    }
+
+    const updateData = {};
+    if (isVerified !== undefined) updateData.isVerified = isVerified;
+    if (isBlocked !== undefined) updateData.isBlocked = isBlocked;
+
+    const updatedContractor = await prisma.contractor.update({
       where: { id: contractorId },
-      data: { isActive },
+      data: updateData,
       include: {
         user: {
           select: {
-            id: true,
-            firstName: true,
-            lastName: true,
             email: true,
-            phone: true
+            firstName: true,
+            lastName: true
           }
         }
       }
     });
 
-    res.json({
-      message: 'Contractor status updated successfully',
-      contractor
-    });
+    return handleResponse(200, 'Contractor status updated successfully.', updatedContractor, res);
   });
 
-  // Get all jobs
-  static getJobs = asyncHandler(async (req, res) => {
-    const { page = 1, limit = 10, status, jobType, search } = req.query;
-
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const where = {};
-
-    if (status) where.status = status;
-    if (jobType) where.jobType = jobType;
-    if (search) {
-      where.OR = [
-        { title: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
-        { address: { contains: search, mode: 'insensitive' } },
-        { city: { contains: search, mode: 'insensitive' } }
-      ];
-    }
-
-    const [jobs, total] = await Promise.all([
-      prisma.job.findMany({
-        where,
-        include: {
-          user: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              phone: true
-            }
-          },
-          contractor: {
-            select: {
-              id: true,
-              businessName: true,
-              businessPhone: true
-            }
-          },
-          quotes: {
-            include: {
-              contractor: {
-                select: {
-                  id: true,
-                  businessName: true
-                }
-              }
-            }
-          },
-          assignments: {
-            include: {
-              worker: {
-                select: {
-                  id: true,
-                  firstName: true,
-                  lastName: true
-                }
-              }
-            }
-          }
-        },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: parseInt(limit)
-      }),
-      prisma.job.count({ where })
-    ]);
-
-    const paginationMeta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
-
-    res.json({
-      jobs,
-      pagination: paginationMeta
-    });
-  });
-
-  // Get job details
-  static getJobDetails = asyncHandler(async (req, res) => {
-    const { jobId } = req.params;
-
-    const job = await prisma.job.findUnique({
-      where: { id: jobId },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            phone: true,
-            address: true,
-            city: true,
-            state: true
-          }
-        },
-        contractor: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
-                phone: true
-              }
-            }
-          }
-        },
-        quotes: {
-          include: {
-            contractor: {
-              select: {
-                id: true,
-                businessName: true,
-                rating: true
-              }
-            }
-          }
-        },
-        assignments: {
-          include: {
-            worker: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                skills: true,
-                rating: true
-              }
-            }
-          }
-        },
-        reviews: {
-          include: {
-            giver: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true
-              }
-            }
-          }
-        },
-        payments: true,
-        chatRoom: {
-          include: {
-            messages: {
-              include: {
-                sender: {
-                  select: {
-                    id: true,
-                    firstName: true,
-                    lastName: true,
-                    role: true
-                  }
-                }
-              },
-              orderBy: { createdAt: 'desc' },
-              take: 20
-            }
-          }
-        }
-      }
-    });
-
-    if (!job) {
-      return res.status(404).json({
-        error: 'Job not found',
-        message: 'The requested job was not found'
-      });
-    }
-
-    res.json({ job });
-  });
-
-  // Get pending verifications
+  // Document Verification
   static getPendingVerifications = asyncHandler(async (req, res) => {
-    const { page = 1, limit = 10, documentType } = req.query;
+    const { page = 1, limit = 10, type } = req.query;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    const where = { verificationStatus: 'PENDING' };
+    const where = { status: 'PENDING' };
 
-    if (documentType) where.documentType = documentType;
+    if (type) where.documentType = type;
 
     const [documents, total] = await Promise.all([
       prisma.document.findMany({
@@ -639,21 +313,13 @@ class AdminController {
               id: true,
               firstName: true,
               lastName: true,
-              email: true,
-              phone: true
+              email: true
             }
           },
-          worker: {
+          contractor: {
             select: {
               id: true,
-              firstName: true,
-              lastName: true,
-              contractor: {
-                select: {
-                  id: true,
-                  businessName: true
-                }
-              }
+              businessName: true
             }
           }
         },
@@ -664,39 +330,41 @@ class AdminController {
       prisma.document.count({ where })
     ]);
 
-    const paginationMeta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
+    const meta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
 
-    res.json({
-      documents,
-      pagination: paginationMeta
-    });
+    return handleResponse(200, 'Pending verifications retrieved successfully.', { documents, meta }, res);
   });
 
-  // Verify document
   static verifyDocument = asyncHandler(async (req, res) => {
     const { documentId } = req.params;
-    const { verificationStatus, rejectionReason } = req.body;
-    const adminId = req.user.id;
+    const { status, remarks } = req.body;
 
-    const document = await prisma.document.update({
+    if (!['VERIFIED', 'REJECTED'].includes(status)) {
+      return handleResponse(400, 'Invalid status.', null, res);
+    }
+
+    const document = await prisma.document.findUnique({
+      where: { id: documentId }
+    });
+
+    if (!document) {
+      return handleResponse(404, 'Document not found.', null, res);
+    }
+
+    const updateData = {
+      status,
+      verifiedAt: new Date(),
+      remarks
+    };
+
+    const updatedDocument = await prisma.document.update({
       where: { id: documentId },
-      data: {
-        verificationStatus,
-        verifiedAt: verificationStatus === 'VERIFIED' ? new Date() : null,
-        verifiedBy: adminId,
-        rejectionReason: verificationStatus === 'REJECTED' ? rejectionReason : null
-      },
+      data: updateData,
       include: {
         user: {
           select: {
             id: true,
-            firstName: true,
-            lastName: true
-          }
-        },
-        worker: {
-          select: {
-            id: true,
+            email: true,
             firstName: true,
             lastName: true
           }
@@ -704,98 +372,12 @@ class AdminController {
       }
     });
 
-    // If document is verified, check if user/worker should be marked as verified
-    if (verificationStatus === 'VERIFIED') {
-      if (document.userId) {
-        // Check if user has all required documents verified
-        const userDocuments = await prisma.document.findMany({
-          where: { userId: document.userId }
-        });
-
-        const allVerified = userDocuments.every(doc => doc.verificationStatus === 'VERIFIED');
-        if (allVerified) {
-          await prisma.user.update({
-            where: { id: document.userId },
-            data: { isVerified: true }
-          });
-        }
-      } else if (document.workerId) {
-        // Check if worker has all required documents verified
-        const workerDocuments = await prisma.document.findMany({
-          where: { workerId: document.workerId }
-        });
-
-        const allVerified = workerDocuments.every(doc => doc.verificationStatus === 'VERIFIED');
-        if (allVerified) {
-          await prisma.worker.update({
-            where: { id: document.workerId },
-            data: { isVerified: true }
-          });
-        }
-      }
-    }
-
-    res.json({
-      message: 'Document verification updated successfully',
-      document
-    });
+    return handleResponse(200, 'Document verified successfully.', updatedDocument, res);
   });
 
-  // Get payments
-  static getPayments = asyncHandler(async (req, res) => {
-    const { page = 1, limit = 10, status, paymentType, startDate, endDate } = req.query;
-
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const where = {};
-
-    if (status) where.status = status;
-    if (paymentType) where.paymentType = paymentType;
-    if (startDate && endDate) {
-      where.createdAt = {
-        gte: new Date(startDate),
-        lte: new Date(endDate)
-      };
-    }
-
-    const [payments, total] = await Promise.all([
-      prisma.payment.findMany({
-        where,
-        include: {
-          user: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-              email: true,
-              phone: true
-            }
-          },
-          job: {
-            select: {
-              id: true,
-              title: true,
-              status: true
-            }
-          }
-        },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: parseInt(limit)
-      }),
-      prisma.payment.count({ where })
-    ]);
-
-    const paginationMeta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
-
-    res.json({
-      payments,
-      pagination: paginationMeta
-    });
-  });
-
-  // Get reports
+  // Reports
   static getReports = asyncHandler(async (req, res) => {
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, type } = req.query;
 
     const dateFilter = {};
     if (startDate && endDate) {
@@ -805,62 +387,46 @@ class AdminController {
       };
     }
 
-    const [
-      jobStats,
-      revenueStats,
-      userStats,
-      contractorStats
-    ] = await Promise.all([
-      // Job statistics
+    const [jobStats, paymentStats, userStats] = await Promise.all([
       prisma.job.groupBy({
         by: ['status'],
-        _count: { status: true },
+        _count: true,
         where: dateFilter
       }),
-      // Revenue statistics
-      prisma.payment.aggregate({
-        where: {
-          status: 'COMPLETED',
-          ...dateFilter
-        },
+      prisma.payment.groupBy({
+        by: ['status'],
+        _count: true,
         _sum: { amount: true },
-        _count: { id: true }
-      }),
-      // User statistics
-      prisma.user.groupBy({
-        by: ['role'],
-        _count: { role: true },
         where: dateFilter
       }),
-      // Contractor statistics
-      prisma.contractor.aggregate({
-        where: {
-          isActive: true,
-          ...dateFilter
-        },
-        _count: { id: true },
-        _avg: { rating: true }
-      })
+      prisma.user.count({ where: dateFilter })
     ]);
 
-    res.json({
+    const reports = {
       jobStats,
-      revenueStats,
+      paymentStats,
       userStats,
-      contractorStats
-    });
+      period: { startDate, endDate }
+    };
+
+    return handleResponse(200, 'Reports retrieved successfully.', reports, res);
   });
 
-  // Get audit logs
+  // Audit Logs
   static getAuditLogs = asyncHandler(async (req, res) => {
-    const { page = 1, limit = 10, action, entityType, userId } = req.query;
+    const { page = 1, limit = 10, userId, action, startDate, endDate } = req.query;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const where = {};
 
-    if (action) where.action = action;
-    if (entityType) where.entityType = entityType;
     if (userId) where.userId = userId;
+    if (action) where.action = action;
+    if (startDate && endDate) {
+      where.createdAt = {
+        gte: new Date(startDate),
+        lte: new Date(endDate)
+      };
+    }
 
     const [logs, total] = await Promise.all([
       prisma.auditLog.findMany({
@@ -869,9 +435,9 @@ class AdminController {
           user: {
             select: {
               id: true,
+              email: true,
               firstName: true,
-              lastName: true,
-              role: true
+              lastName: true
             }
           }
         },
@@ -882,12 +448,47 @@ class AdminController {
       prisma.auditLog.count({ where })
     ]);
 
-    const paginationMeta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
+    const meta = generatePaginationMeta(parseInt(page), parseInt(limit), total);
 
-    res.json({
-      logs,
-      pagination: paginationMeta
-    });
+    return handleResponse(200, 'Audit logs retrieved successfully.', { logs, meta }, res);
+  });
+
+  // Commission Settings
+  static getCommissionRate = asyncHandler(async (req, res) => {
+    let settings = await prisma.adminSettings.findFirst();
+    if (!settings) {
+      settings = await prisma.adminSettings.create({
+        data: {
+          commissionRate: 0.1, // Default 10%
+        },
+      });
+    }
+    return handleResponse(200, 'Commission rate retrieved successfully.', { settings }, res);
+  });
+
+  static setCommissionRate = asyncHandler(async (req, res) => {
+    const { commissionRate } = req.body;
+    if (commissionRate === undefined || commissionRate === null) {
+      return handleResponse(400, 'Commission rate is required.', null, res);
+    }
+
+    let settings = await prisma.adminSettings.findFirst();
+    if (!settings) {
+      settings = await prisma.adminSettings.create({
+        data: {
+          commissionRate: parseFloat(commissionRate),
+        },
+      });
+    } else {
+      settings = await prisma.adminSettings.update({
+        where: { id: settings.id },
+        data: {
+          commissionRate: parseFloat(commissionRate),
+        },
+      });
+    }
+
+    return handleResponse(200, 'Commission rate updated successfully.', { settings }, res);
   });
 }
 

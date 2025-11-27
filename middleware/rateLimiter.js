@@ -60,3 +60,28 @@ export const quoteLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+// Payment order creation rate limiter (strict)
+export const paymentOrderLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 15,
+  message: {
+    error: 'Too many payment requests',
+    message: 'Too many payment requests, please try again later. Maximum 15 orders per hour.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Payment verification rate limiter (very strict)
+export const paymentVerificationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,
+  message: {
+    error: 'Too many verification attempts',
+    message: 'Too many payment verification attempts, please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
