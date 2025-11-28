@@ -518,7 +518,8 @@ model ChatMessage {
   chatRoomId String
   senderId   String
   message    String
-  read       Boolean  @default(false)
+  readByUser    Boolean  @default(false)
+  readByContractor Boolean @default(false)
   createdAt  DateTime @default(now())
 
   chatRoom ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)

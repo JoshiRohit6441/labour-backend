@@ -47,8 +47,14 @@ export const subscribe = async (req, res) => {
   const { subscription } = req.body;
   const userId = req.user.id;
 
-  await prisma.pushSubscription.create({
-    data: {
+  await prisma.pushSubscription.upsert({
+    where: { endpoint: subscription.endpoint },
+    update: {
+      userId,
+      p256dh: subscription.keys.p256dh,
+      auth: subscription.keys.auth,
+    },
+    create: {
       userId,
       endpoint: subscription.endpoint,
       p256dh: subscription.keys.p256dh,

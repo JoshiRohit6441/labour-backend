@@ -18,10 +18,17 @@ class LocationController {
         id: jobId,
         contractorId: contractor.id,
       },
+      include: {
+        assignments: true,
+      },
     });
 
     if (!job) {
       return handleResponse(404, 'Job not found or you do not have permission to start travel', null, res);
+    }
+
+    if (!job.assignments || job.assignments.length === 0) {
+      return handleResponse(400, 'You must assign at least one worker to the job before starting to travel.', null, res);
     }
 
     const updatedJob = await prisma.job.update({

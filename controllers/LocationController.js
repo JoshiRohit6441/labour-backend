@@ -109,7 +109,7 @@ class LocationController {
     // Broadcast the location update to the user
     const socketService = req.app.get('socketService');
     if (socketService && socketService.io) {
-      socketService.io.to(`job_${jobId}`).emit('location:update', {
+      socketService.io.to(`job_${jobId}`).emit('location_update', {
         latitude,
         longitude,
       });

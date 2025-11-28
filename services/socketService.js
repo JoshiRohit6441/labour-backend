@@ -126,14 +126,49 @@ class SocketService {
         await this.handleNewMessage(chatRoomId, senderId, message);
       });
 
+      socket.on("mark_message_read", async ({ chatRoomId }) => {
+        const userId = socket.user?.id;
+        if (!chatRoomId || !userId) return;
+
+        const user = await prisma.user.findUnique({ where: { id: userId }, select: { role: true } });
+        if (!user) return;
+        const isContractor = user.role === 'CONTRACTOR';
+
+        const data = {};
+        if (isContractor) {
+            data.readByContractor = true;
+        } else {
+            data.readByUser = true;
+        }
+
+        await prisma.chatMessage.updateMany({
+            where: {
+                chatRoomId: chatRoomId,
+                senderId: { not: userId }
+            },
+            data: data
+        });
+      });
+
       socket.on("disconnect", (reason) => {
       });
     });
   }
 
   async handleNewMessage(chatRoomId, senderId, message) {
+    const sender = await prisma.user.findUnique({ where: { id: senderId }, select: { role: true } });
+    if (!sender) return;
+
+    const isContractor = sender.role === 'CONTRACTOR';
+
     const chatMessage = await prisma.chatMessage.create({
-      data: { chatRoomId, senderId, message },
+      data: {
+        chatRoomId,
+        senderId,
+        message,
+        readByUser: !isContractor,
+        readByContractor: isContractor,
+      },
       include: {
         sender: {
           select: {

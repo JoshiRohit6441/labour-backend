@@ -1,26 +1,32 @@
 import prisma from '../../config/database.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 import handleResponse from '../../utils/handleResponse.js';
+import { generateWorkerToken } from '../../utils/auth.js';
 
 class WorkerController {
   static verifyLocationCode = asyncHandler(async (req, res) => {
     const { jobId } = req.params;
     const { securityCode, workerPhone } = req.body;
 
-    const job = await prisma.job.findFirst({
-      where: {
-        id: jobId,
-        locationSharingWorkerPhone: workerPhone,
-        locationSharingCode: securityCode,
-        locationSharingCodeExpiresAt: { gt: new Date() },
-      },
-    });
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
 
-    if (!job) {
-      return handleResponse(401, 'Invalid security code or phone number', null, res);
+    if (!job || !job.locationSharingCode) {
+      return handleResponse(404, 'Job not found or location sharing not enabled.', null, res);
     }
 
-    const token = generateToken({ jobId, workerPhone }, '1h');
+    if (job.locationSharingCode !== securityCode) {
+      return handleResponse(401, 'Invalid security code.', null, res);
+    }
+
+    if (job.locationSharingWorkerPhone !== workerPhone) {
+      return handleResponse(401, 'Phone number does not match.', null, res);
+    }
+
+    if (new Date() > job.locationSharingCodeExpiresAt) {
+      return handleResponse(401, 'Security code has expired.', null, res);
+    }
+
+    const token = generateWorkerToken({ jobId, workerPhone });
 
     return handleResponse(200, 'Security code verified successfully', { token }, res);
   });
@@ -42,8 +48,8 @@ class WorkerController {
       if (socketService && socketService.sendNotificationToUser) {
         await socketService.sendNotificationToUser(
           updatedJob.userId,
-          'WORKER_ON_THE_WAY',
-          'Worker on the way',
+          'TRACKING_STARTED',
+          'Worker started journey',
           `The worker is on the way for the job: ${updatedJob.title}`,
           { jobId, cta: 'TRACK_WORKER' }
         );

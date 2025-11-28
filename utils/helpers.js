@@ -1,4 +1,15 @@
 import { v4 as uuidv4 } from 'uuid';
+import moment from 'moment';
+
+// Generate 6-digit random code
+export const generate6Digit = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+// Add minutes to current date
+export const addMinutes = (minutes) => {
+  return moment().add(minutes, 'minutes').toDate();
+};
 
 // Generate unique ID
 export const generateId = () => {

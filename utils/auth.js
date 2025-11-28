@@ -8,6 +8,11 @@ export const generateToken = (payload) => {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 };
 
+// Generate JWT token for worker
+export const generateWorkerToken = (payload, expiresIn = '6h') => {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn });
+};
+
 // Generate refresh token
 export const generateRefreshToken = (payload) => {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_REFRESH_EXPIRES_IN });

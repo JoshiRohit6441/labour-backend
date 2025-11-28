@@ -1,10 +1,11 @@
 import prisma from '../../config/database.js';
-import { calculateDistance, generatePaginationMeta } from '../../utils/helpers.js';
+import { calculateDistance, generatePaginationMeta, generate6Digit, addMinutes } from '../../utils/helpers.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 import handleResponse from '../../utils/handleResponse.js';
 import cloudinary from '../../config/cloudinaryConfig.js';
 import notificationQueue from '../../config/queue.js';
 import redisClient from '../../config/redisConfig.js';
+import { createOrGetChatRoom } from '../../utils/chat.js';
 
 // Helper to upload buffer to Cloudinary
 const uploadToCloudinary = (fileBuffer) => {
@@ -198,7 +199,7 @@ class JobController {
     }
 
     const where = {
-      status: { in: ['PENDING', 'QUOTED'] },
+      status: 'PENDING',
       jobType: { in: ['IMMEDIATE', 'BIDDING'] }
     };
 
@@ -214,7 +215,7 @@ class JobController {
       const rMeters = parseFloat(radius) * 1000;
       const rawJobs = await prisma.$queryRawUnsafe(
         `SELECT j.* FROM jobs j 
-         WHERE j.status IN ('PENDING','QUOTED') 
+         WHERE j.status = 'PENDING'
            AND j.job_type IN ('IMMEDIATE','BIDDING')
            AND ST_DWithin(
              ST_SetSRID(ST_Point(j.longitude, j.latitude), 4326)::geography,
@@ -434,7 +435,10 @@ class JobController {
     const { workerIds = [] } = req.body || {};
     const userId = req.user.id;
 
-    const contractor = await prisma.contractor.findUnique({ where: { userId } });
+    const contractor = await prisma.contractor.findUnique({
+      where: { userId },
+      include: { user: { select: { phone: true } } },
+    });
     if (!contractor) {
       return handleResponse(404, 'Please create a contractor profile first', null, res);
     }
@@ -465,7 +469,15 @@ class JobController {
     const { ok, customerId } = await prisma.$transaction(async (tx) => {
       const updatedCount = await tx.job.updateMany({
         where: { id: jobId, contractorId: null, status: { in: ['PENDING', 'QUOTED'] } },
-        data: { contractorId: contractor.id, status: 'ACCEPTED' }
+        data: {
+          contractorId: contractor.id,
+          status: 'ACCEPTED',
+          isLocationTracking: true,
+          travelStatus: 'NOT_STARTED',
+          locationSharingCode: generate6Digit(),
+          locationSharingWorkerPhone: contractor.user.phone,
+          locationSharingCodeExpiresAt: addMinutes(120),
+        },
       });
 
       if (updatedCount.count === 0) return { ok: false };
@@ -506,20 +518,10 @@ class JobController {
       return handleResponse(409, 'This job has already been accepted by another contractor', null, res);
     }
 
-    await prisma.chatRoom.upsert({
-      where: { jobId },
-      update: {
-        participants: {
-          connect: [{ id: userId }, { id: customerId }],
-        },
-      },
-      create: {
-        jobId,
-        participants: {
-          connect: [{ id: userId }, { id: customerId }],
-        },
-      },
-    });
+    await createOrGetChatRoom(jobId, customerId, userId);
+    
+    const cacheKey = `job:${jobId}`;
+    await redisClient.del(cacheKey);
 
     try {
       const socketService = req.app.get('socketService');
@@ -528,12 +530,12 @@ class JobController {
         await socketService.sendNotificationToUser(
           customerId,
           'JOB_ACCEPTED',
-          'Your job was accepted',
+          'Your helping hand is on the way',
           `${contractor.businessName} accepted your job`,
           { jobId, contractorId: contractor.id, cta: 'SEE_JOB' }
         );
 
-        socketService.io.to(`user_${customerId}`).emit('job_accepted', {
+        socketService.io.to(`job_${jobId}`).emit('job_accepted', {
           jobId,
           contractorId: contractor.id,
           contractorName: contractor.businessName
@@ -541,8 +543,7 @@ class JobController {
       }
     } catch (_) { }
 
-    const updated = await prisma.job.findUnique({ where: { id: jobId } });
-    return handleResponse(200, 'Job claimed successfully', { job: updated }, res);
+    return res.json({ success: true, jobId: job.id });
   });
 
 
@@ -1127,8 +1128,13 @@ class JobController {
 
     const updatedJob = await prisma.job.update({
       where: { id: jobId },
-      data: { status: 'ACCEPTED' },
+      data: { status: 'ACCEPTED', isLocationTracking: true, travelStatus: 'NOT_STARTED' },
     });
+
+    const cacheKey = `job:${jobId}`;
+    await redisClient.del(cacheKey);
+
+    await createOrGetChatRoom(jobId, job.userId, userId);
 
     // Notify user
     try {
@@ -1137,7 +1143,7 @@ class JobController {
         await socketService.sendNotificationToUser(
           job.userId,
           'JOB_ACCEPTED',
-          'Your job offer was accepted!',
+          'Your helping hand is on the way',
           `Contractor ${contractor.businessName} has accepted your job offer for "${job.title}".`,
           { jobId, contractorId: contractor.id }
         );
